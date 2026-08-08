@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\FinanceApp.Core\FinanceApp.Core.csproj" />
+    <ProjectReference Include="..\FinanceApp.AI\FinanceApp.AI.csproj" />
+    <ProjectReference Include="..\FinanceApp.Skills\FinanceApp.Skills.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+  </PropertyGroup>
+
+</Project>

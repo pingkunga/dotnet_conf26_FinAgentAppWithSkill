@@ -1,0 +1,15 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <!--
+    Package versions are pinned here as they're introduced by each project (see docs/spec.md §8).
+    Add a version once, reference it version-less from the individual .csproj files:
+      <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+  -->
+  <ItemGroup>
+  </ItemGroup>
+
+</Project>
