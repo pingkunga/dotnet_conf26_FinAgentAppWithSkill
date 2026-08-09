@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-financeapp}
+      POSTGRES_USER: ${POSTGRES_USER:-financeapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-financeapp} -d ${POSTGRES_DB:-financeapp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # web:
+  #   build: { context: ., dockerfile: src/FinanceApp.Web/Dockerfile }
+  #   depends_on: { postgres: { condition: service_healthy } }
+  #   environment:
+  #     ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:-changeme}"
+  #     AI__EngineType: ${AI_ENGINE_TYPE:-Ollama}
+  #     AI__Endpoint: ${AI_ENDPOINT:-http://host.docker.internal:11434}
+  #     AI__ModelName: ${AI_MODEL_NAME:-llama3.2}
+  #     AI__ApiKey: ${AI_API_KEY:-}
+  #     AI__SupportsVision: ${AI_SUPPORTS_VISION:-false}
+  #   ports: ["8080:8080"]
+  #   # added once src/FinanceApp.Web/Dockerfile exists — see docs/spec.md §6
+
+volumes:
+  pgdata:
