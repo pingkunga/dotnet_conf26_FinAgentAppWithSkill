@@ -1,0 +1,13 @@
+﻿@inherits LayoutComponentBase
+@layout FinanceApp.Web.Components.Layout.MainLayout
+
+<MudText Typo="Typo.h5" Class="mb-4">Manage your account</MudText>
+
+<MudGrid>
+    <MudItem xs="12" md="3">
+        <ManageNavMenu />
+    </MudItem>
+    <MudItem xs="12" md="9">
+        @Body
+    </MudItem>
+</MudGrid>

@@ -1,6 +1,13 @@
 using FinanceApp.Core;
+using FinanceApp.Core.Abstractions;
+using FinanceApp.Core.Entities;
 using FinanceApp.Web.Components;
+using FinanceApp.Web.Components.Account;
+using FinanceApp.Web.Services;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,8 +15,52 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-builder.Services.AddDbContext<FinanceDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Finance")));
+builder.Services.AddMudServices();
+
+// --- EF Core / current-user (docs/spec.md §2a points 3, 5) ---
+builder.Services.AddScoped<ICurrentUserAccessor, AuthStateCurrentUserAccessor>();
+
+var connectionString = builder.Configuration.GetConnectionString("Finance");
+// AddDbContext (scoped) — required by AddEntityFrameworkStores<FinanceDbContext>() below.
+//
+// docs/spec.md §2a point 5 also calls for AddDbContextFactory<FinanceDbContext> for skill scripts'
+// per-invocation scopes (§3.4). Deliberately NOT registered yet: calling both AddDbContext and
+// AddDbContextFactory for the same context type conflicts once the context has an extra
+// scoped-lifetime constructor dependency (ICurrentUserAccessor here) — `dotnet ef migrations` failed
+// DI validation with "Cannot consume scoped service 'DbContextOptions<FinanceDbContext>' from
+// singleton 'IDbContextFactory<FinanceDbContext>'" when both were registered together. When skills are
+// implemented, follow the documented Blazor+EF Core pattern instead (learn.microsoft.com/aspnet/core/blazor/blazor-ef-core):
+// register only AddDbContextFactory<FinanceDbContext>, inject IDbContextFactory<FinanceDbContext>
+// directly into skill code, and call CreateDbContext()/CreateDbContextAsync() per script invocation —
+// do not also add a derived scoped FinanceDbContext registration alongside AddDbContext.
+builder.Services.AddDbContext<FinanceDbContext>(options => options.UseNpgsql(connectionString));
+
+// --- ASP.NET Core Identity (docs/spec.md §2a) ---
+builder.Services.AddCascadingAuthenticationState();
+builder.Services.AddScoped<IdentityRedirectManager>();
+builder.Services.AddScoped<AuthenticationStateProvider, IdentityRevalidatingAuthenticationStateProvider>();
+
+builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultScheme = IdentityConstants.ApplicationScheme;
+        options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
+    })
+    .AddIdentityCookies();
+
+builder.Services.AddIdentityCore<ApplicationUser>(options =>
+    {
+        // No real email sender is configured (IdentityNoOpEmailSender below) — requiring confirmation
+        // would lock every newly registered user out. Deliberate deviation from the `-au Individual`
+        // template default (docs/spec.md §2a).
+        options.SignIn.RequireConfirmedAccount = false;
+        options.Stores.SchemaVersion = IdentitySchemaVersions.Version3;
+    })
+    .AddRoles<IdentityRole<Guid>>()
+    .AddEntityFrameworkStores<FinanceDbContext>()
+    .AddSignInManager()
+    .AddDefaultTokenProviders();
+
+builder.Services.AddSingleton<IEmailSender<ApplicationUser>, IdentityNoOpEmailSender>();
 
 var app = builder.Build();
 
@@ -31,10 +82,16 @@ if (!app.Environment.IsDevelopment())
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 app.UseHttpsRedirection();
 
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.UseAntiforgery();
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
+
+// Login/Register/Manage/Logout endpoints for the Components/Account/** pages (docs/spec.md §2a point 6).
+app.MapAdditionalIdentityEndpoints();
 
 app.Run();

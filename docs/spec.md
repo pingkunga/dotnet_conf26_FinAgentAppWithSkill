@@ -154,6 +154,19 @@ table goes away. Package: `Microsoft.AspNetCore.Identity.EntityFrameworkCore`, r
    `AddAuthentication(IdentityConstants.ApplicationScheme).AddIdentityCookies()`. Use that exact call, **not**
    `AddIdentity<TUser, TRole>()`, which wires a conflicting cookie scheme in this combination.
 
+   **MudBlazor trap on these pages (found via actual POST testing, not just `dotnet build`):** the
+   `Components/Account/Pages/**` pages are static SSR (`[ExcludeFromInteractiveRouting]`, see
+   `Pages/_Imports.razor`) and bind via `[SupplyParameterFromForm]`, which requires each field's rendered
+   `<input>` to carry a real `name="Input.X"` HTML attribute. Blazor's built-in `InputText`/`InputCheckbox`
+   emit this automatically from the bound `FieldIdentifier`; **`MudTextField`/`MudCheckBox` do not** — a
+   naive swap compiles cleanly and looks right in the browser, but the underlying `<input>` has no `name`,
+   so a real form submission sends nothing for that field and the page just re-renders "field is required."
+   `dotnet build` cannot catch this — only an actual POST (or a real browser) does. Fix: splat an explicit
+   `name="Input.X"` attribute onto every `MudTextField`/`MudCheckBox` bound to a `[SupplyParameterFromForm]`
+   model on these pages (confirmed working — MudBlazor forwards unmatched attributes to the native input).
+   This does **not** apply to pages using `@rendermode InteractiveServer` with `@bind-Value` alone (no
+   `[SupplyParameterFromForm]`), e.g. the future finance CRUD pages — only to Identity's static-SSR forms.
+
 7. **Firm requirement — agent/skill calls must be strictly scoped to the requesting user, always.** A skill
    invocation made on behalf of User A must never resolve, read, or return User B/C's data, regardless of
    how the request is phrased or what the LLM internally decides to do. This is stronger than "the database
@@ -429,6 +442,26 @@ authenticated user.
    Docker image — revisit the Dockerfile if that ever changes.
 5. Migrations owned exclusively by `Web`; `McpServer` is read-only against the same database.
 6. Ollama itself isn't containerized by default in Compose (assumed to run on the host).
+
+## Future improvements (deliberately out of scope for now)
+The `-au Individual` scaffold's 2FA, Passkey, and External Login pages were copied in along with the rest
+of `Components/Account/**` (§2a point 6) but have since been **removed entirely** — code, nav links, and
+the endpoints in `IdentityComponentsEndpointRouteBuilderExtensions.cs` that backed them
+(`PerformExternalLogin`, `PasskeyCreationOptions`, `PasskeyRequestOptions`, `Manage/LinkExternalLogin`) —
+because this demo app only needs password-based register/login/reset/profile to prove out the Skills
+feature; that surface area was unused complexity, not a security decision. If ever revisited:
+- **Two-factor authentication** (`Manage/EnableAuthenticator`, `Disable2fa`, `ResetAuthenticator`,
+  `TwoFactorAuthentication`, `GenerateRecoveryCodes`, `Shared/ShowRecoveryCodes`, `Pages/LoginWith2fa`,
+  `Pages/LoginWithRecoveryCode`) — re-scaffold a fresh `-au Individual` template and re-copy these files;
+  `Login.razor`'s `LoginUser()` would need its `result.RequiresTwoFactor` branch (removed) restored.
+- **Passkeys/WebAuthn** (`Manage/Passkeys`, `RenamePasskey`, `Shared/PasskeySubmit(.razor.js)`,
+  `PasskeyInputModel.cs`, `PasskeyOperation.cs`, plus the `PasskeyCreationOptions`/`PasskeyRequestOptions`
+  endpoints) — same re-copy approach; note `AspNetUserPasskeys` stays in the schema regardless (it's part
+  of `IdentityDbContext`'s standard model, unaffected by removing the UI).
+- **External login providers** (`Manage/ExternalLogins`, `Pages/ExternalLogin`, `Shared/ExternalLoginPicker`,
+  the `PerformExternalLogin`/`Manage/LinkExternalLogin` endpoints) — same re-copy approach; would also need
+  actual provider registration (Google/Microsoft/etc. `AddAuthentication().Add...()` calls) in `Program.cs`,
+  which was never wired up even before removal.
 
 ## Verify at implementation time (isolated uncertainty, preview/alpha package surfaces)
 1. **`IChatClient` → `AIAgent` construction** (§3.3) — exact type/extension method on `Microsoft.Agents.AI`
