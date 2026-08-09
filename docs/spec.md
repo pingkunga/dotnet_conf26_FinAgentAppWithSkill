@@ -213,21 +213,36 @@ documents all five provider shapes with placeholders; real secrets only via `.en
 
 `IChatClient` is registered as a **singleton** (thread-safe, expensive-ish to construct, no per-request state).
 
-### 3.3 `IChatClient` → `AIAgent` — the one genuinely open question, quarantined to one file
-The doc's example wraps a Responses-capable Azure client (`.GetResponsesClient().AsAIAgent(...)`), but this
-app must also support Ollama/Gemini/Anthropic, which aren't Responses clients. `src/FinanceApp.AI/IAgentFactory.cs`
-is declared as **the single seam** allowed to construct an `AIAgent`:
+### 3.3 `IChatClient` → `AIAgent` — resolved (was the one genuinely open question), quarantined to one file
+**Verified 2026-08-10** via a reflection dump + a runnable round-trip test against the real
+`Microsoft.Agents.AI` 1.17.0 / `Microsoft.Extensions.AI` 10.8.3 packages (a hand-rolled `IChatClient` test
+double, no network dependency — construct → attach an `AgentSkillsProvider` → run a prompt → got a
+response back). Findings, favorable — **no per-provider fallback needed**:
+- `Microsoft.Extensions.AI.ChatClientExtensions.AsAIAgent(this IChatClient, ChatClientAgentOptions, ILoggerFactory?, IServiceProvider?)`
+  → `ChatClientAgent : AIAgent` is a **universal** extension method. It works identically for *any*
+  `IChatClient` — Azure/OpenAI, Ollama, Gemini, Anthropic all reach `AIAgent` through this one call; none
+  of them need to be Responses-API-capable. The doc's Azure Responses-client example is one way in, not
+  the only way in.
+- `ChatClientAgentOptions.AIContextProviders` (an `IEnumerable<AIContextProvider>`) accepts an
+  `AgentSkillsProvider` directly — confirmed `agent.AIContextProviders[0]` round-trips to the exact
+  `AgentSkillsProvider` instance passed in.
+- **One detail that didn't match the original guess**: `ChatClientAgentOptions` has no `Instructions`
+  property of its own — set instructions via `ChatClientAgentOptions.ChatOptions.Instructions`
+  (`ChatOptions` being `Microsoft.Extensions.AI.ChatOptions`) instead; confirmed it round-trips to
+  `AIAgent.Instructions` after construction.
+
+`src/FinanceApp.AI/IAgentFactory.cs` + `AgentFactory.cs` are implemented (the single seam allowed to
+construct an `AIAgent`):
 ```csharp
 public interface IAgentFactory {
     AIAgent CreateAgent(AgentSkillsProvider skillsProvider, string? instructions = null);
 }
 ```
-At implementation time, check the installed `Microsoft.Agents.AI` 1.17.0 API for a generic
-`IChatClient`-based construction path (a `ChatClientAgent(IChatClient, ChatClientAgentOptions)` type is the
-likely candidate, given `ChatClientAgentOptions` is already named in the docs). If no generic path exists
-for a given provider, degrade gracefully — log a startup warning and mark that provider's chat as
-unavailable (CRUD pages keep working; `Chat.razor` shows "agent unavailable for this provider") rather than
-crashing. Nothing outside `AgentFactory.cs` needs to change if the construction approach changes.
+Since construction is now confirmed universal, the originally-planned graceful-degradation fallback ("log a
+startup warning and mark that provider's chat as unavailable if no generic path exists") is **not needed at
+this layer** — every `IChatClient` `ChatClientFactory` (§3.1) can produce works here unchanged. Runtime
+failures from a specific provider (bad API key, network down, etc.) are an ordinary error-handling concern
+for `ChatSessionService`/`Chat.razor`, not something `AgentFactory` needs to special-case.
 
 ### 3.4 Scoped vs. singleton
 - **Singleton**: `IChatClient`, `AgentFileSkillsSource` (just reads files), the MCP `McpClient` connection.
@@ -464,18 +479,25 @@ feature; that surface area was unused complexity, not a security decision. If ev
   which was never wired up even before removal.
 
 ## Verify at implementation time (isolated uncertainty, preview/alpha package surfaces)
-1. **`IChatClient` → `AIAgent` construction** (§3.3) — exact type/extension method on `Microsoft.Agents.AI`
-   1.17.0; contained entirely to `FinanceApp.AI/AgentFactory.cs`.
+1. ~~**`IChatClient` → `AIAgent` construction`~~ **RESOLVED 2026-08-10** — see §3.3;
+   `IAgentFactory`/`AgentFactory.cs` implemented and building against the real package.
 2. **Anthropic provider** — whether `Microsoft.Agents.AI.Anthropic` (preview) exposes a plain `IChatClient`
    factory, or is actually agent-level and needs a documented exception in `ChatClientFactory`'s otherwise
    uniform shape; `Anthropic.SDK` 5.10.0 is the fallback.
 3. **`Microsoft.Agents.AI.Mcp`** (alpha) — exact API for building `skill://index.json` server-side content
-   in `FinanceApp.McpServer`, and the experimental-usage diagnostic ID to suppress.
+   in `FinanceApp.McpServer`, and the experimental-usage diagnostic ID to suppress. Still open — the spike
+   only installed core `Microsoft.Agents.AI`; `.UseMcpSkills(...)` (§4.4) wasn't in that package's exported
+   types, so it must come from this alpha package and remains unverified.
 4. **`ModelContextProtocol` vs `ModelContextProtocol.Core`** — confirm which package/namespace
    `McpClient`/`StdioClientTransport` actually live in.
-5. **`AgentSkillsProviderBuilder`** fluent method signatures (`.UseFileSkill`, `.UseSkill`, `.UseMcpSkills`,
-   `.UseFilter`) — confirm exact overloads (e.g. does `.UseSkill` accept a factory delegate, needed for the
-   per-request inline OCR skill in §4.2) against the installed package before writing `AgentFactory`.
+5. **`AgentSkillsProviderBuilder`** fluent method signatures — **partially resolved 2026-08-10** via the
+   same reflection dump: `.UseFileSkill(skillPath, options, scriptRunner)`, `.UseFileSkills(...)`,
+   `.UseSkill(AgentSkill)`, `.UseSkills(...)`, `.UseSource(...)`, `.UseFilter(Func<...>)`, `.Build()` all
+   confirmed to exist with roughly the expected shapes. `.UseSkill` takes a plain already-constructed
+   `AgentSkill` instance, not a factory delegate — matches the plan (§4.2's per-request inline OCR skill is
+   built via `ReceiptOcrSkillFactory.Create(...)` *before* being passed to `.UseSkill(...)`, not deferred to
+   the builder). `.UseMcpSkills` was **not** among core `Microsoft.Agents.AI`'s exported types — still
+   unverified, tracked under item 3 above (comes from the alpha Mcp package).
 6. Blazor `InputFile` max-size override syntax against the current .NET 10 API.
 7. Confirm `AddAuthentication(IdentityConstants.ApplicationScheme).AddIdentityCookies()` vs
    `AddIdentity<ApplicationUser, IdentityRole<Guid>>()` cookie-scheme interaction against the installed
