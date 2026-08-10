@@ -432,6 +432,20 @@ endpoint (or each finance page individually) is protected via `[Authorize]` /
 `.RequireAuthorization()` — every page below except the Account pages themselves requires an
 authenticated user.
 
+**Render mode — global, not per-page (found while implementing `Transactions.razor`/`Budgets.razor`,
+2026-08-10)**: `Components/App.razor`'s `<Routes @rendermode="InteractiveServer" />` sets Interactive
+Server as the app-wide default; `Components/Account/Pages/_Imports.razor`'s `[ExcludeFromInteractiveRouting]`
+(already present from the scaffold copy, §2a point 6) keeps only the Identity pages on static SSR/form-POST,
+exactly the documented pattern for combining ASP.NET Core Identity with a globally-interactive Blazor Web
+App. **Do not** try to fix a "component doesn't work" issue by adding `@rendermode InteractiveServer` to
+just the one page that seems broken — first found that in isolation, it wasn't enough: `MudPopoverProvider`/
+`MudDialogProvider`/`MudSnackbarProvider` (declared once in `MainLayout.razor`, per §-Layout-conventions)
+need to be **inside the same interactive boundary** as any page using a popover-based MudBlazor component
+(`MudSelect`, `MudDatePicker`, `MudMenu`, ...) — per-page `@rendermode` makes that one page's own content
+interactive but leaves the shared layout (and its providers) static, so the popover portal has no JS backing
+and silently does nothing when clicked. The global `<Routes @rendermode="...">` approach avoids this by
+construction: `MainLayout` and every non-excluded page share one interactive boundary.
+
 `src/FinanceApp.Web/Components/Pages/`:
 - **`Transactions.razor`** — plain CRUD grid over `Transaction`, direct repository calls, no agent
   involved. Proves the agent is assistive, not the only way to enter data.
