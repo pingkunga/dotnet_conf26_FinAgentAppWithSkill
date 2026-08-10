@@ -20,11 +20,16 @@ services:
   #   depends_on: { postgres: { condition: service_healthy } }
   #   environment:
   #     ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:-changeme}"
-  #     AI__EngineType: ${AI_ENGINE_TYPE:-Ollama}
-  #     AI__Endpoint: ${AI_ENDPOINT:-http://host.docker.internal:11434}
-  #     AI__ModelName: ${AI_MODEL_NAME:-llama3.2}
-  #     AI__ApiKey: ${AI_API_KEY:-}
-  #     AI__SupportsVision: ${AI_SUPPORTS_VISION:-false}
+  #     AI__ENGINE_TYPE: ${AI__ENGINE_TYPE:-Ollama}
+  #     AI__ENDPOINT: ${AI__ENDPOINT:-http://host.docker.internal:11434}
+  #     AI__MODEL_NAME: ${AI__MODEL_NAME:-llama3.2}
+  #     AI__API_KEY: ${AI__API_KEY:-}
+  #     AI__SUPPORTS_VISION: ${AI__SUPPORTS_VISION:-false}
+  #     # Same names on both sides on purpose — .env's AI__* vars pass straight through, no renaming.
+  #     # (This block predates ChatClientFactory's real implementation, docs/spec.md §3.1/§3.2 — it
+  #     # originally guessed PascalCase container-side names (AI__EngineType) fed from single-underscore
+  #     # .env names (AI_ENGINE_TYPE); §3.2 now documents that ChatClientFactory actually reads ALL_CAPS
+  #     # keys via indexer, so both sides were updated to match instead of introducing a rename.)
   #   ports: ["8080:8080"]
   #   # added once src/FinanceApp.Web/Dockerfile exists — see docs/spec.md §6
 
