@@ -186,17 +186,38 @@ table goes away. Package: `Microsoft.AspNetCore.Identity.EntityFrameworkCore`, r
 **Location**: new project `src/FinanceApp.AI` — isolates all LLM-provider code so `Skills` (needed for the
 receipt-OCR vision call) doesn't need an ASP.NET Core dependency, and `Web/Program.cs` stays thin.
 
-### 3.1 `ChatClientFactory.cs` (ported from gitea-aihook)
-Same shape as the reference implementation: `CreateChatClient(AiOptions options)` switches on engine type
+### 3.1 `ChatClientFactory.cs` (ported from gitea-aihook) — **implemented 2026-08-11**
+Fetched the real reference source (`GiteaAiSummarizerNET/Services/ChatClientFactory.cs`, not assumed from
+memory) to confirm exact package IDs/types before writing this. Same shape: static
+`ChatClientFactory.CreateChatClient(AiOptions options)` switches on engine type
 (`Azure/OpenAI/Ollama/Gemini/Anthropic` constants) and returns `IChatClient`:
 - Azure → `OpenAI.Chat.ChatClient(credential, model, options: new OpenAIClientOptions{Endpoint=...}).AsIChatClient()`
-- OpenAI → `new OpenAIClient(key).GetChatClient(model).AsIChatClient()`
-- Ollama → `new OllamaApiClient(httpClientWith40MinTimeout){ SelectedModel = model }`
-- Gemini → `new GenerativeAIChatClient(key, model)`
-- **Anthropic (finishing what gitea-aihook left incomplete)**: try `Microsoft.Agents.AI.Anthropic`
-  (1.17.0-preview) first; fall back to `Anthropic.SDK` (5.10.0) if that package's shape doesn't fit the
-  uniform `IChatClient` pattern — both isolated behind one `case` branch (see "Verify" below)
-- Unknown type → `NotSupportedException`
+  (package `OpenAI` 2.12.0 + `Microsoft.Extensions.AI.OpenAI` 10.8.3 for `.AsIChatClient()`)
+- OpenAI → `new OpenAIClient(key).GetChatClient(model).AsIChatClient()` (same two packages)
+- Ollama → `new OllamaApiClient(httpClientWith40MinTimeout){ SelectedModel = model }` (package `OllamaSharp` 5.4.30)
+- Gemini → `new GenerativeAIChatClient(key, model)` (package `Google_GenerativeAI.Microsoft` 3.6.7 — note the
+  underscore in the *package id*; its namespace is `GenerativeAI.Microsoft`, no underscore)
+- **Anthropic — resolved, differently than planned** (see verify-item 2 below): `Microsoft.Agents.AI.Anthropic`
+  turned out to be agent-level only (`AnthropicClient.AsAIAgent(model:, name:, instructions:)`, confirmed via
+  Microsoft Learn's own Anthropic-provider page — no `IChatClient` in its public surface). Used
+  `Anthropic.SDK` 5.10.0 (tghamm, community) instead: `new AnthropicClient(key).Messages` implements
+  `IChatClient` directly (confirmed via that repo's README + `AnthropicClient.cs`/`APIAuthentication.cs`
+  source). Unlike every other provider, its model isn't set at client construction — `Messages` takes it
+  per-call via `ChatOptions.ModelId` — so the default from `AiOptions.ModelName` is baked in via
+  `new ChatClientBuilder(client).ConfigureOptions(o => o.ModelId ??= options.ModelName).Build()`.
+- Unknown type (or a required field missing for the selected type) → `NotSupportedException` /
+  `ArgumentException` respectively — no provider construction touches the network, confirmed by
+  `tests/FinanceApp.AI.Tests` constructing all 5 with bogus (but shaped) credentials and asserting no throw.
+  One deliberate deviation from gitea-aihook's validation: it didn't require `ModelName` for OpenAI or
+  Anthropic (only Azure/Ollama/Gemini); this port requires it for those two as well, so a missing model
+  name fails fast with a clear `ArgumentException` instead of a confusing error from the provider SDK later.
+
+**`docker-compose.yml`'s commented `web:` placeholder was fixed to match** (found in the same pass,
+2026-08-11): it originally guessed PascalCase container-side names (`AI__EngineType`) fed from
+single-underscore `.env` names (`AI_ENGINE_TYPE`) — a plausible-looking guess written before
+`ChatClientFactory` existed, under the same false assumption §3.2 originally made. Updated so `.env`'s
+`AI__*` names and the container-side names are identical (`AI__ENGINE_TYPE: ${AI__ENGINE_TYPE:-Ollama}`,
+...) — no renaming in between, one convention end to end.
 
 ### 3.2 Config — `AiOptions` (strongly typed, bound from `"AI"` section)
 ```csharp
@@ -210,9 +231,22 @@ public sealed class AiOptions {
 }
 ```
 Env-var override convention preserved from gitea-aihook (`AI__ENGINE_TYPE`, `AI__ENDPOINT`,
-`AI__MODEL_NAME`, `AI__API_KEY`, `AI__SUPPORTS_VISION`) — Docker-friendly, no extra binding code needed.
+`AI__MODEL_NAME`, `AI__API_KEY`, `AI__SUPPORTS_VISION`) — Docker-friendly. **Correction, found while wiring
+`Program.cs` (2026-08-11)**: "no extra binding code needed" was wrong as originally written. The `AI` section's
+keys are `ALL_CAPS_WITH_UNDERSCORES` (matching gitea-aihook's own `appsettings.example.json` — it uses the
+same raw indexer reads, not `IOptions` binding either), and `ConfigurationBinder`'s property matching is
+case-insensitive but **not** underscore-insensitive: `ENGINE_TYPE`/`MODEL_NAME`/`API_KEY`/`SUPPORTS_VISION`
+silently fail to bind to `AiOptions.EngineType`/`ModelName`/`ApiKey`/`SupportsVision` via a plain
+`section.Bind(options)` (only `ENDPOINT`, which happens to contain no underscore, binds by accident) —
+confirmed empirically in `FinanceApp.AI.Tests.ChatClientFactoryTests.ConfigurationBinder_DoesNotMatchUnderscoredKeysToPascalCaseProperties`.
+`Program.cs` therefore builds `AiOptions` by reading `configuration.GetSection("AI")["ENGINE_TYPE"]` etc.
+directly via the indexer (same as gitea-aihook), not `AddOptions<AiOptions>().BindConfiguration("AI")`.
+Also found and fixed: the checked-in `.env.example` had single-underscore `AI_ENGINE_TYPE` etc., which
+ASP.NET Core's environment-variable provider never nests under section `AI` at all (only `__` double
+underscore maps to `:` — a single `_` stays a literal flat key) — corrected to `AI__ENGINE_TYPE` and so on.
 Dev default in `appsettings.json`: Ollama (no key required, lowest local friction). `appsettings.example.json`
-documents all five provider shapes with placeholders; real secrets only via `.env`/environment.
+(`src/FinanceApp.Web/`) documents all five provider shapes with placeholders; real secrets only via
+`.env`/environment.
 
 `IChatClient` is registered as a **singleton** (thread-safe, expensive-ish to construct, no per-request state).
 
@@ -529,9 +563,10 @@ feature; that surface area was unused complexity, not a security decision. If ev
 ## Verify at implementation time (isolated uncertainty, preview/alpha package surfaces)
 1. ~~**`IChatClient` → `AIAgent` construction`~~ **RESOLVED 2026-08-10** — see §3.3;
    `IAgentFactory`/`AgentFactory.cs` implemented and building against the real package.
-2. **Anthropic provider** — whether `Microsoft.Agents.AI.Anthropic` (preview) exposes a plain `IChatClient`
-   factory, or is actually agent-level and needs a documented exception in `ChatClientFactory`'s otherwise
-   uniform shape; `Anthropic.SDK` 5.10.0 is the fallback.
+2. ~~**Anthropic provider**~~ **RESOLVED 2026-08-11** — `Microsoft.Agents.AI.Anthropic` (preview) is
+   agent-level only (`AnthropicClient.AsAIAgent(...)`, per Microsoft Learn's Anthropic-provider doc page —
+   no `IChatClient` exposed), so `ChatClientFactory` uses the documented fallback, `Anthropic.SDK` 5.10.0
+   (tghamm, community): `new AnthropicClient(key).Messages` implements `IChatClient` directly. See §3.1.
 3. **`Microsoft.Agents.AI.Mcp`** (alpha) — exact API for building `skill://index.json` server-side content
    in `FinanceApp.McpServer`, and the experimental-usage diagnostic ID to suppress. Still open — the spike
    only installed core `Microsoft.Agents.AI`; `.UseMcpSkills(...)` (§4.4) wasn't in that package's exported
@@ -560,7 +595,10 @@ feature; that surface area was unused complexity, not a security decision. If ev
 - ~~`src/FinanceApp.Web/Components/Account/**`~~ — **done**, copied from a `-au Individual` scaffold (§2a point 6)
 - ~~`src/FinanceApp.AI/AgentFactory.cs`~~ — **done**, verified against the real package (§3.3)
 - ~~`src/FinanceApp.Skills/Budgeting/BudgetSkill.cs`~~ — **done**, + `BudgetRepository.cs` (Core) + unit tests (§4.1)
-- `src/FinanceApp.AI/ChatClientFactory.cs` — ported multi-provider factory (§3.1) — **next up**
+- ~~`src/FinanceApp.AI/ChatClientFactory.cs`~~ — **done**, ported multi-provider factory + `AiOptions.cs`,
+  unit-tested (`tests/FinanceApp.AI.Tests`), wired as `IChatClient`/`IAgentFactory` singletons in
+  `Web/Program.cs` (§3.1/§3.2) — **next up**: `ChatSessionService` (per-conversation `AIAgent`, §3.4),
+  the other 3 skills, MCP server
 - `src/FinanceApp.McpServer/Program.cs` — stdio MCP server; must never write to stdout (§5)
 - `src/FinanceApp.Web/Services/McpServerLauncher.cs` — subprocess lifecycle + graceful degradation (§5)
 - ~~`src/FinanceApp.Core/FinanceDbContext.cs`~~ — **done** (§2/§2a/§5)
