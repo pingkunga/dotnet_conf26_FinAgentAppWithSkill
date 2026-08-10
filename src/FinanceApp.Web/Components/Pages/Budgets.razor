@@ -1,0 +1,139 @@
+@page "/Budgets"
+@attribute [Authorize]
+@using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Entities
+@using FinanceApp.Core.Repositories
+@using Microsoft.EntityFrameworkCore
+@inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
+@inject ISnackbar Snackbar
+
+<PageTitle>Budgets</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-4">Budgets</MudText>
+
+<MudPaper Class="pa-4 mb-4">
+    <EditForm Model="this" OnValidSubmit="SetBudgetAsync">
+        <MudGrid>
+            <MudItem xs="12" sm="4">
+                <MudSelect T="Guid?" @bind-Value="categoryId" Label="Category" Required="true">
+                    @foreach (var c in categories)
+                    {
+                        <MudSelectItem Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudNumericField T="decimal" @bind-Value="limitAmount" Label="Monthly limit" Min="0.01m" Format="F2" Required="true" />
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudDatePicker @bind-Date="periodMonth" Label="Month" Editable="true" />
+            </MudItem>
+            <MudItem xs="12" sm="2" Class="d-flex align-center">
+                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">Save</MudButton>
+            </MudItem>
+        </MudGrid>
+    </EditForm>
+</MudPaper>
+
+<MudTable Items="statuses" Hover="true" Loading="loading">
+    <HeaderContent>
+        <MudTh>Category</MudTh>
+        <MudTh>Spent</MudTh>
+        <MudTh>Limit</MudTh>
+        <MudTh>Usage</MudTh>
+        <MudTh>Status</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Category">@context.CategoryName</MudTd>
+        <MudTd DataLabel="Spent">@context.SpentAmount.ToString("C")</MudTd>
+        <MudTd DataLabel="Limit">@context.LimitAmount.ToString("C")</MudTd>
+        <MudTd DataLabel="Usage">
+            <MudProgressLinear Value="@((double)Math.Min(context.PercentUsed, 100))"
+                                Color="@(context.IsOver ? Color.Error : context.IsNear ? Color.Warning : Color.Success)"
+                                Class="my-1" />
+            @context.PercentUsed.ToString("F0")%
+        </MudTd>
+        <MudTd DataLabel="Status">
+            @if (context.IsOver)
+            {
+                <MudChip T="string" Color="Color.Error" Size="Size.Small">Over</MudChip>
+            }
+            else if (context.IsNear)
+            {
+                <MudChip T="string" Color="Color.Warning" Size="Size.Small">Near</MudChip>
+            }
+            else
+            {
+                <MudChip T="string" Color="Color.Success" Size="Size.Small">OK</MudChip>
+            }
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        <MudText>No budgets set for this month.</MudText>
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private List<Category> categories = [];
+    private List<BudgetStatus> statuses = [];
+    private bool loading = true;
+
+    private Guid? categoryId;
+    private decimal limitAmount;
+    private DateTime? periodMonth = DateTime.Today;
+
+    protected override async Task OnInitializedAsync()
+    {
+        categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+        await LoadStatusAsync();
+    }
+
+    private async Task LoadStatusAsync()
+    {
+        loading = true;
+        var period = DateOnly.FromDateTime(periodMonth ?? DateTime.Today);
+        // Shared with BudgetSkill.CheckBudgetStatusAsync (docs/spec.md §7) — same computation, one source of truth.
+        statuses = (await BudgetRepository.GetBudgetStatusAsync(Db, CurrentUser.UserId!.Value, period)).ToList();
+        loading = false;
+    }
+
+    private async Task SetBudgetAsync()
+    {
+        if (categoryId is null || limitAmount <= 0)
+        {
+            Snackbar.Add("Pick a category and enter a limit greater than zero.", Severity.Warning);
+            return;
+        }
+
+        var period = new DateOnly((periodMonth ?? DateTime.Today).Year, (periodMonth ?? DateTime.Today).Month, 1);
+
+        var existing = await Db.Budgets.FirstOrDefaultAsync(b =>
+            b.UserId == CurrentUser.UserId && b.CategoryId == categoryId && b.PeriodMonth == period);
+
+        if (existing is null)
+        {
+            Db.Budgets.Add(new Budget
+            {
+                Id = Guid.NewGuid(),
+                UserId = CurrentUser.UserId!.Value,
+                CategoryId = categoryId.Value,
+                PeriodMonth = period,
+                LimitAmount = limitAmount,
+            });
+        }
+        else
+        {
+            existing.LimitAmount = limitAmount;
+        }
+
+        await Db.SaveChangesAsync();
+
+        categoryId = null;
+        limitAmount = 0;
+
+        await LoadStatusAsync();
+        Snackbar.Add("Budget saved.", Severity.Success);
+    }
+}

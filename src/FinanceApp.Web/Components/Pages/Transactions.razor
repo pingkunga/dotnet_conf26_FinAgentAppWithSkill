@@ -1,0 +1,131 @@
+@page "/Transactions"
+@attribute [Authorize]
+@using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Entities
+@using Microsoft.EntityFrameworkCore
+@inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
+@inject ISnackbar Snackbar
+
+<PageTitle>Transactions</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-4">Transactions</MudText>
+
+<MudPaper Class="pa-4 mb-4">
+    <EditForm Model="this" OnValidSubmit="AddTransactionAsync">
+        <MudGrid>
+            <MudItem xs="12" sm="3">
+                <MudSelect T="Guid?" @bind-Value="categoryId" Label="Category" Required="true">
+                    @foreach (var c in categories)
+                    {
+                        <MudSelectItem Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" sm="2">
+                <MudNumericField T="decimal" @bind-Value="amount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudDatePicker @bind-Date="occurredOn" Label="Date" />
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudTextField @bind-Value="description" Label="Description" />
+            </MudItem>
+            <MudItem xs="12" sm="1" Class="d-flex align-center">
+                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">Add</MudButton>
+            </MudItem>
+        </MudGrid>
+    </EditForm>
+</MudPaper>
+
+<MudTable Items="transactions" Hover="true" Loading="loading">
+    <HeaderContent>
+        <MudTh>Date</MudTh>
+        <MudTh>Category</MudTh>
+        <MudTh>Amount</MudTh>
+        <MudTh>Description</MudTh>
+        <MudTh>Source</MudTh>
+        <MudTh></MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Date">@context.OccurredOn.ToString("yyyy-MM-dd")</MudTd>
+        <MudTd DataLabel="Category">@(context.Category?.Name ?? "(uncategorized)")</MudTd>
+        <MudTd DataLabel="Amount">@context.Amount.ToString("C")</MudTd>
+        <MudTd DataLabel="Description">@context.Description</MudTd>
+        <MudTd DataLabel="Source">@context.Source</MudTd>
+        <MudTd>
+            <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" OnClick="() => DeleteTransactionAsync(context)" />
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        <MudText>No transactions yet.</MudText>
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private List<Category> categories = [];
+    private List<Transaction> transactions = [];
+    private bool loading = true;
+
+    private Guid? categoryId;
+    private decimal amount;
+    private DateTime? occurredOn = DateTime.Today;
+    private string? description;
+
+    protected override async Task OnInitializedAsync()
+    {
+        categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+        await LoadTransactionsAsync();
+    }
+
+    private async Task LoadTransactionsAsync()
+    {
+        loading = true;
+        transactions = await Db.Transactions
+            .Include(t => t.Category)
+            .OrderByDescending(t => t.OccurredOn)
+            .Take(100)
+            .ToListAsync();
+        loading = false;
+    }
+
+    private async Task AddTransactionAsync()
+    {
+        if (categoryId is null || amount <= 0)
+        {
+            Snackbar.Add("Pick a category and enter an amount greater than zero.", Severity.Warning);
+            return;
+        }
+
+        Db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = CurrentUser.UserId!.Value,
+            CategoryId = categoryId,
+            Amount = amount,
+            OccurredOn = DateOnly.FromDateTime(occurredOn ?? DateTime.Today),
+            Description = string.IsNullOrWhiteSpace(description) ? null : description,
+            Source = TransactionSource.Manual,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+
+        await Db.SaveChangesAsync();
+
+        categoryId = null;
+        amount = 0;
+        description = null;
+        occurredOn = DateTime.Today;
+
+        await LoadTransactionsAsync();
+        Snackbar.Add("Transaction added.", Severity.Success);
+    }
+
+    private async Task DeleteTransactionAsync(Transaction transaction)
+    {
+        Db.Transactions.Remove(transaction);
+        await Db.SaveChangesAsync();
+        await LoadTransactionsAsync();
+        Snackbar.Add("Transaction deleted.", Severity.Info);
+    }
+}

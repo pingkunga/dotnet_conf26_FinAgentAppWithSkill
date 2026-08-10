@@ -11,6 +11,12 @@
 <MudLayout>
     <MudAppBar Elevation="1">
         <MudText Typo="Typo.h6" Class="ml-2">MyFinanceWithAgentSkill</MudText>
+        <AuthorizeView>
+            <Authorized>
+                <MudButton Href="Transactions" Variant="Variant.Text" Color="Color.Inherit" Class="ml-4">Transactions</MudButton>
+                <MudButton Href="Budgets" Variant="Variant.Text" Color="Color.Inherit">Budgets</MudButton>
+            </Authorized>
+        </AuthorizeView>
         <MudSpacer />
         <AuthorizeView>
             <Authorized>
