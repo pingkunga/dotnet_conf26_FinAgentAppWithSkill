@@ -6,4 +6,7 @@
     <Project Path="src/FinanceApp.Skills/FinanceApp.Skills.csproj" />
     <Project Path="src/FinanceApp.Web/FinanceApp.Web.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FinanceApp.Skills.Tests/FinanceApp.Skills.Tests.csproj" />
+  </Folder>
 </Solution>

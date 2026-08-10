@@ -134,15 +134,18 @@ table goes away. Package: `Microsoft.AspNetCore.Identity.EntityFrameworkCore`, r
    `_accessor.UserId` inline — referencing a live service call inside the filter expression interacts badly
    with EF Core's model cache.
 
-5. **DbContext registration is split, not one `AddDbContext` for everything**:
-   - `AddDbContext<FinanceDbContext>` (scoped) — required by `AddEntityFrameworkStores<FinanceDbContext>()`,
-     which Identity's stores expect to be scoped.
-   - `AddDbContextFactory<FinanceDbContext>` — for component/skill code that isn't one single short-lived
-     operation. Blazor Server keeps one circuit alive across many interleaved operations (page loads *and*
-     agent skill scripts firing mid-conversation); a single scoped context shared across all of that hits
-     the classic "A second operation was started on this context before a previous operation completed"
-     failure. This refines, not replaces, §3.4's existing `IServiceScopeFactory`-per-script-invocation rule
-     for skills — the factory is what those per-script scopes resolve their `FinanceDbContext` from.
+5. **DbContext registration: plain `AddDbContext<FinanceDbContext>` (scoped) only** — required by
+   `AddEntityFrameworkStores<FinanceDbContext>()`, which Identity's stores expect to be scoped.
+   **Correction from an earlier draft of this point**: `AddDbContextFactory<FinanceDbContext>` *alongside*
+   `AddDbContext<FinanceDbContext>` was tried and found to conflict — DI validation throws "Cannot consume
+   scoped service `DbContextOptions<FinanceDbContext>` from singleton `IDbContextFactory<FinanceDbContext>`"
+   once the context has an extra scoped constructor dependency (`ICurrentUserAccessor`, point 3 below) — the
+   two registrations fight over `DbContextOptions<FinanceDbContext>`. Skills solve the "one circuit, many
+   interleaved operations" problem differently instead (§3.4's addendum): each script resolves only
+   `DbContextOptions<FinanceDbContext>` from its own `IServiceScopeFactory.CreateScope()` (safe — plain
+   `AddDbContext` still registers that standalone) and constructs `FinanceDbContext` manually with a
+   `FixedCurrentUserAccessor` bound to the skill's captured `userId`, rather than resolving the context
+   itself from DI. No `AddDbContextFactory` needed anywhere in this app.
 
 6. **Blazor Identity UI — scaffold into a temp directory and copy the pieces out; do not re-scaffold
    `FinanceApp.Web` in place and do not hand-write the Identity pages.** Re-scaffolding in place would
@@ -252,30 +255,61 @@ for `ChatSessionService`/`Chat.razor`, not something `AgentFactory` needs to spe
 - `BudgetSkill` and `ReceiptOcrSkillFactory` are given an injected `IServiceScopeFactory` (not a live scope)
   and open `using var scope = _scopeFactory.CreateScope();` **inside each script invocation** — a script can
   fire after the original Blazor circuit's DI scope is gone, so capturing a live scope risks
-  `ObjectDisposedException` on the DbContext. Each such scope resolves `FinanceDbContext` via
-  `AddDbContextFactory` (§2a point 5), not the request-scoped `AddDbContext` registration.
+  `ObjectDisposedException` on the DbContext.
 - `ChatSessionService` resolves the real authenticated user through `ICurrentUserAccessor` (§2a) when it
   builds the per-conversation `AIAgent`, and passes that `Guid` explicitly into `BudgetSkill`'s and
   `ReceiptOcrSkillFactory`'s construction — every skill script then operates against that specific user,
   never the old hardcoded default. This is what makes the §2a point 7 isolation rule concrete: a skill has
   no other source of "which user" than what `ChatSessionService` gave it at construction time.
 
+**How a script actually gets a correctly-scoped `FinanceDbContext` (found + confirmed while implementing
+`BudgetSkill`, 2026-08-10)**: resolving `FinanceDbContext` normally from the script's scope would run it
+through the *real* `ICurrentUserAccessor` (`AuthStateCurrentUserAccessor`, Web) — which has no
+request/circuit to derive a user from outside HTTP, hits the `InvalidOperationException` catch already
+built into it, and returns `UserId = null`. That would make `FinanceDbContext`'s own query filters
+(`x.UserId == _currentUserId`) silently return **zero rows for every query**, regardless of the `userId`
+the skill was constructed with — the opposite failure mode from a leak, but still wrong, and still a
+concrete instance of "the scoping must be enforced structurally" (§2a point 7). Fix, now the standard
+pattern for any skill (and `FinanceApp.McpServer`, §5, which has the identical problem): resolve only
+`DbContextOptions<FinanceDbContext>` from the scope (registered scoped by plain `AddDbContext`, §2a point
+5 — resolvable standalone without needing `ICurrentUserAccessor`), then construct
+`new FinanceDbContext(options, new FixedCurrentUserAccessor(userId))` manually, where
+`FixedCurrentUserAccessor` (`FinanceApp.Core/Abstractions/FixedCurrentUserAccessor.cs`) is a trivial
+`ICurrentUserAccessor` that always returns the fixed `userId` it was built with. See `BudgetSkill.cs`'s
+`CreateDbContext` helper for the reference implementation. `AddDbContextFactory` (mentioned in an earlier
+draft of this section) is **not used** — it was tried and found to conflict with `AddDbContext` once
+`FinanceDbContext` has this extra scoped constructor dependency (see §2a point 5's correction note).
+
 ---
 
 ## 4. The Four Skills
 
-### 4.1 Budgeting → Class-based skill
+### 4.1 Budgeting → Class-based skill — **implemented and unit-tested 2026-08-10**
 `src/FinanceApp.Skills/Budgeting/BudgetSkill.cs`, deriving `AgentClassSkill<BudgetSkill>`:
 - `[AgentSkillScript("add_transaction")]`, `list_transactions`, `set_budget`, `check_budget_status`
-  (returns per-category spent/limit/percent; flags Near ≥80%, Over >100%)
+  (returns per-category spent/limit/percent; flags Near ≥80%, Over >100%, computed by the shared
+  `FinanceApp.Core.Repositories.BudgetRepository.GetBudgetStatusAsync`, factored out so the future Budgets
+  CRUD page and this skill can't drift apart)
 - `[AgentSkillResource("budgeting-policy")]` — the near/over-budget house rules
 - Constructed with `IServiceScopeFactory` **and the current authenticated `Guid userId`** (from
   `ChatSessionService` via `ICurrentUserAccessor`, §2a/§3.4), registered via
   `.UseSkill(new BudgetSkill(scopeFactory, userId))` — every script method filters/writes against that
-  specific user only, never a hardcoded default and never a user id taken from an LLM-provided argument
-- **Directly unit-testable** (`tests/FinanceApp.Skills.Tests/BudgetSkillTests.cs`) — call the
-  `[AgentSkillScript]` methods as plain async methods against a seeded `FinanceDbContext`, no LLM/agent
-  involved. This is the concrete payoff of choosing class-based here.
+  specific user only, never a hardcoded default and never a user id taken from an LLM-provided argument;
+  see §3.4's addendum for exactly how each script gets a correctly-scoped `FinanceDbContext`
+  (`FixedCurrentUserAccessor`, not a DI-resolved one).
+- **API details confirmed empirically** (reflection + a constructed/invoked test subclass, not just docs) —
+  `AgentClassSkill<T>`'s one constructor takes `Func<JsonElement?, AIFunctionArguments>? argumentMarshaler`;
+  `null` is fine, default JSON→parameter binding just works. `Frontmatter` and `Instructions` are both
+  **abstract** — a subclass must override them explicitly, there's no auto-derivation from the class name.
+  `[AgentSkillScript]`/`[AgentSkillResource]`-attributed members are auto-discovered via reflection at
+  construction time, no manual registration. `skill.Resources` is `null` (not empty) when a skill declares
+  no resources.
+- **Directly unit-testable** (`tests/FinanceApp.Skills.Tests/BudgetSkillTests.cs`) — calls the
+  `[AgentSkillScript]` methods as plain async methods against an EF Core InMemory-backed `FinanceDbContext`
+  (not Postgres — keeps `dotnet test` Docker-free per §8), no LLM/agent involved. This is the concrete
+  payoff of choosing class-based here. Includes a cross-user isolation test (two `BudgetSkill` instances,
+  same in-memory "database", different `userId`s) as the concrete instance of the §2a point 7 check for
+  this skill.
 
 ### 4.2 Receipt OCR → Code-defined inline skill
 `src/FinanceApp.Skills/ReceiptOcr/ReceiptOcrSkillFactory.cs` — **not** a static instance; built per
@@ -505,14 +539,15 @@ feature; that surface area was unused complexity, not a security decision. If ev
    `-au Individual` template's `Program.cs` is the reference to copy from, not assumed from memory.
 
 ## Critical files to create first
-- `src/FinanceApp.Core/Entities/ApplicationUser.cs` — Identity-backed user entity (§2a)
-- `src/FinanceApp.Web/Services/ICurrentUserAccessor.cs` — resolves the authenticated user id from
-  `AuthenticationStateProvider`; everything else's user-scoping depends on this (§2a points 3-4)
-- `src/FinanceApp.Web/Components/Account/**` — copied from a `-au Individual` scaffold, not hand-written (§2a point 6)
-- `src/FinanceApp.AI/AgentFactory.cs` — the isolated `IChatClient`→`AIAgent` risk boundary (§3.3)
-- `src/FinanceApp.AI/ChatClientFactory.cs` — ported multi-provider factory (§3.1)
-- `src/FinanceApp.Skills/Budgeting/BudgetSkill.cs` — class-based skill + its unit tests (§4.1)
+- ~~`src/FinanceApp.Core/Entities/ApplicationUser.cs`~~ — **done** (§2a)
+- ~~`ICurrentUserAccessor`~~ — **done**: interface in `FinanceApp.Core/Abstractions/` (not Web — see §2a
+  point 3's resolved ambiguity), `AuthStateCurrentUserAccessor` impl in `FinanceApp.Web/Services/`, plus
+  `FixedCurrentUserAccessor` (`Core/Abstractions/`) for non-HTTP contexts (§3.4 addendum)
+- ~~`src/FinanceApp.Web/Components/Account/**`~~ — **done**, copied from a `-au Individual` scaffold (§2a point 6)
+- ~~`src/FinanceApp.AI/AgentFactory.cs`~~ — **done**, verified against the real package (§3.3)
+- ~~`src/FinanceApp.Skills/Budgeting/BudgetSkill.cs`~~ — **done**, + `BudgetRepository.cs` (Core) + unit tests (§4.1)
+- `src/FinanceApp.AI/ChatClientFactory.cs` — ported multi-provider factory (§3.1) — **next up**
 - `src/FinanceApp.McpServer/Program.cs` — stdio MCP server; must never write to stdout (§5)
 - `src/FinanceApp.Web/Services/McpServerLauncher.cs` — subprocess lifecycle + graceful degradation (§5)
-- `src/FinanceApp.Core/FinanceDbContext.cs` — schema shared by `Web` and `McpServer` (§2/§2a/§5)
+- ~~`src/FinanceApp.Core/FinanceDbContext.cs`~~ — **done** (§2/§2a/§5)
 - `docker-compose.yml`, `src/FinanceApp.Web/Dockerfile` — multi-stage build bundling both apps (§6)
