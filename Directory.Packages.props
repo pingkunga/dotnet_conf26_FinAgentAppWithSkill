@@ -20,6 +20,15 @@
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- ChatClientFactory (docs/spec.md §3.1) — one PackageVersion per provider's IChatClient source -->
+    <PackageVersion Include="OpenAI" Version="2.12.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.3" />
+    <PackageVersion Include="OllamaSharp" Version="5.4.30" />
+    <PackageVersion Include="Google_GenerativeAI.Microsoft" Version="3.6.7" />
+    <PackageVersion Include="Anthropic.SDK" Version="5.10.0" />
+    <!-- FinanceApp.AI.Tests — proving/disproving §3.2's env-var-binding claim (see ChatClientFactoryTests) -->
+    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.10" />
   </ItemGroup>
 
 </Project>

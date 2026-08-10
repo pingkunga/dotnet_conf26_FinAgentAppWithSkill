@@ -1,3 +1,4 @@
+using FinanceApp.AI;
 using FinanceApp.Core;
 using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
@@ -7,6 +8,7 @@ using FinanceApp.Web.Services;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.AI;
 using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -61,6 +63,30 @@ builder.Services.AddIdentityCore<ApplicationUser>(options =>
     .AddDefaultTokenProviders();
 
 builder.Services.AddSingleton<IEmailSender<ApplicationUser>, IdentityNoOpEmailSender>();
+
+// --- ChatClientFactory (docs/spec.md §3.1/§3.2) ---
+// Read via GetSection(...)[...] indexer, not config.Bind(aiOptions)/AddOptions<AiOptions>().BindConfiguration:
+// the "AI" section's keys follow gitea-aihook's ALL_CAPS_WITH_UNDERSCORES convention (ENGINE_TYPE,
+// MODEL_NAME, ...) so that AI__ENGINE_TYPE-style env vars (.env.example) work Docker-side without extra
+// code. ConfigurationBinder's property matching is case-insensitive but NOT underscore-insensitive, so
+// .Bind() silently leaves EngineType/ModelName/ApiKey/SupportsVision at their defaults — confirmed via
+// FinanceApp.AI.Tests' ConfigurationBinder_DoesNotMatchUnderscoredKeysToPascalCaseProperties (only
+// ENDPOINT, which has no underscore, binds correctly by accident). IChatClient is a singleton — thread-safe
+// and relatively expensive to construct, no per-request state (docs/spec.md §3.2).
+builder.Services.AddSingleton<IChatClient>(sp =>
+{
+    var aiSection = builder.Configuration.GetSection(AiOptions.SectionName);
+    var aiOptions = new AiOptions
+    {
+        EngineType = aiSection["ENGINE_TYPE"] ?? "",
+        Endpoint = aiSection["ENDPOINT"],
+        ModelName = aiSection["MODEL_NAME"] ?? "",
+        ApiKey = aiSection["API_KEY"],
+        SupportsVision = bool.TryParse(aiSection["SUPPORTS_VISION"], out var supportsVision) && supportsVision,
+    };
+    return ChatClientFactory.CreateChatClient(aiOptions);
+});
+builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 
 var app = builder.Build();
 

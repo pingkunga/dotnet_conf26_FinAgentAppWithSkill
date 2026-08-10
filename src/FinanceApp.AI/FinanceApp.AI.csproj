@@ -9,6 +9,12 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" />
     <PackageReference Include="Microsoft.Extensions.AI" />
+    <!-- ChatClientFactory providers (docs/spec.md §3.1) -->
+    <PackageReference Include="OpenAI" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="OllamaSharp" />
+    <PackageReference Include="Google_GenerativeAI.Microsoft" />
+    <PackageReference Include="Anthropic.SDK" />
   </ItemGroup>
 
 </Project>
