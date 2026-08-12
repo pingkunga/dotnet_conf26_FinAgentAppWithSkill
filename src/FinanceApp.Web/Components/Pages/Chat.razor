@@ -5,6 +5,7 @@
 @using FinanceApp.AI
 @using FinanceApp.Core
 @using FinanceApp.Web.Services
+@using Markdig
 @using Microsoft.EntityFrameworkCore
 @inject ChatSessionService ChatSession
 @inject FinanceDbContext Db
@@ -26,7 +27,15 @@
             @foreach (var m in messages)
             {
                 <MudText Typo="Typo.body1" Align="@(m.IsUser ? Align.Right : Align.Left)" Class="mb-2">
-                    <b>@(m.IsUser ? "You" : "Assistant"):</b> @m.Text
+                    <b>@(m.IsUser ? "You" : "Assistant"):</b>
+                    @if (m.IsUser)
+                    {
+                        @m.Text
+                    }
+                    else
+                    {
+                        @((MarkupString)Markdown.ToHtml(m.Text, MarkdownPipeline))
+                    }
                 </MudText>
             }
             @if (isStreaming)
@@ -49,6 +58,15 @@
 </MudGrid>
 
 @code {
+    // Assistant messages are rendered as markdown (tables, code blocks, emphasis — docs/spec.md §7); user
+    // input stays plain text, it never needs formatting. UseAdvancedExtensions() is what makes pipe tables
+    // parse at all (Markdig's plain default pipeline leaves "| A | B |" as a literal paragraph — confirmed
+    // via a spike). DisableHtml() is not optional: without it, raw HTML in the model's response (e.g. a
+    // prompt-injected "<script>...") passes straight through into the page unescaped — confirmed via the
+    // same spike (a literal <script> tag survived to the rendered HTML). Built once, not per-render.
+    private static readonly MarkdownPipeline MarkdownPipeline =
+        new MarkdownPipelineBuilder().UseAdvancedExtensions().DisableHtml().Build();
+
     // Goals.razor's "Get guidance" button navigates here as /Chat?goalId=<guid> (docs/spec.md §7) — the
     // savings-goals/savings-calculator skills are file-based with no DB access of their own (unlike
     // BudgetSkill), so the only way the agent sees real numbers is if this page puts them in the prompt

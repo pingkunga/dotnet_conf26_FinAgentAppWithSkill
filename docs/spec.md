@@ -503,6 +503,21 @@ new AgentSkillsProviderBuilder()
     .Build();
 ```
 
+**Future idea, not decided/scheduled (2026-08-12)**: this skill is the one place in the app where
+`Microsoft.Agents.AI.Harness`'s `HarnessAgent` (evaluated and *not* adopted for the file-skill trust-boundary
+question, see §4.3) might actually earn its keep. "Analyze this month's spending vs. last month, flag
+anomalies, suggest budget changes" is genuinely multi-step (gather via MCP → analyze → compare →
+recommend) — exactly what Harness's default **Plan/Execute mode + todo tracking** exist for, unlike the
+quick single-turn exchanges `Chat.razor`'s main agent handles. If this is ever tried: build it as a
+**second, separate `HarnessAgent` instance** dedicated to a "generate monthly report" action (its own
+button, not the shared chat input box) — don't swap the main `ChatSessionService` agent over to Harness,
+since none of its other capabilities (web search, background agents, file memory, shell execution) have a
+motivated use here, and `Microsoft.Agents.AI.Tools.Shell` specifically should stay unused in an app handling
+people's financial data. Background-agent delegation could also let "generate my report" run without
+blocking the main chat, if that's ever wanted. None of this is required for §4.4 to work — `.UseMcpSkills`
+above is sufficient on its own — this is an optional enhancement idea, parked here for whenever the MCP
+skill itself gets built.
+
 ---
 
 ## 5. The MCP Server Project (`FinanceApp.McpServer`)
@@ -658,6 +673,18 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
   against. The receipt prompt names the exact dynamically-registered skill (`receipt-ocr-{id:N}`), not just
   "the receipt I uploaded" — necessary because every such skill shares the same description, so if more
   than one receipt is pending in the same session only the exact name disambiguates which one to load.
+
+  **Markdown rendering (added 2026-08-12)**: assistant messages render through
+  [Markdig](https://github.com/xoofx/markdig) (`Markdown.ToHtml(text, pipeline)` → `MarkupString`) so
+  tables/code blocks/emphasis in model output actually display instead of showing raw `**`/`|` characters;
+  user-typed input stays plain text. The pipeline is
+  `new MarkdownPipelineBuilder().UseAdvancedExtensions().DisableHtml().Build()`, built once
+  (`static readonly`), and **both calls matter**, confirmed via a spike:
+  `UseAdvancedExtensions()` is required for pipe tables to parse at all (Markdig's bare default pipeline
+  leaves `| A | B |` as a literal paragraph, not a `<table>`) and `DisableHtml()` is a real security
+  requirement, not a nice-to-have — without it, raw HTML embedded in the model's response (e.g. a
+  prompt-injected `<script>...`) passes straight through into the rendered page unescaped; the spike
+  confirmed a literal `<script>` tag survives to the output HTML on Markdig's default settings.
 
   **API correction, found via a reflection dump + a hand-rolled `IChatClient` round-trip spike against the
   real package (2026-08-11, not from spec's original guess)**: the run/streaming surface is
