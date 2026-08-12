@@ -1,0 +1,137 @@
+@page "/Chat"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using FinanceApp.AI
+@using FinanceApp.Web.Services
+@inject ChatSessionService ChatSession
+
+<PageTitle>Chat</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-4">Chat</MudText>
+
+<MudGrid>
+    <MudItem xs="12" md="8">
+        <MudPaper Class="pa-4 mb-4" Style="height:60vh; overflow-y:auto;">
+            @if (messages.Count == 0)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">
+                    Ask about your transactions or budgets — e.g. "add a $12 dining expense today" or
+                    "how am I doing on my budgets this month?"
+                </MudText>
+            }
+            @foreach (var m in messages)
+            {
+                <MudText Typo="Typo.body1" Align="@(m.IsUser ? Align.Right : Align.Left)" Class="mb-2">
+                    <b>@(m.IsUser ? "You" : "Assistant"):</b> @m.Text
+                </MudText>
+            }
+            @if (isStreaming)
+            {
+                <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+            }
+        </MudPaper>
+        <MudPaper Class="pa-2 d-flex gap-2">
+            <MudTextField @bind-Value="input" name="ChatInput" Label="Message" FullWidth="true"
+                          Disabled="isStreaming" OnKeyDown="OnInputKeyDown" Immediate="true" />
+            <MudButton OnClick="SendAsync" Disabled="@(isStreaming || string.IsNullOrWhiteSpace(input))"
+                       Color="Color.Primary" Variant="Variant.Filled">
+                Send
+            </MudButton>
+        </MudPaper>
+    </MudItem>
+    <MudItem xs="12" md="4">
+        <AgentActivityLog Entries="activityLog" />
+    </MudItem>
+</MudGrid>
+
+@code {
+    private readonly List<ChatEntry> messages = [];
+    private readonly List<SkillActivityEntry> activityLog = [];
+    private string input = "";
+    private bool isStreaming;
+    private bool disposed;
+    private CancellationTokenSource? cts;
+
+    private async Task SendAsync()
+    {
+        if (string.IsNullOrWhiteSpace(input) || isStreaming)
+        {
+            return;
+        }
+
+        // The input/button are disabled while isStreaming, so this can't currently fire mid-stream from
+        // the UI — kept anyway as the one line standing between "single send at a time" (today) and
+        // "new send supersedes an in-flight one" (e.g. Goals.razor's planned pre-filled-prompt handoff,
+        // spec §7), and it's what actually unwinds a stream on DisposeAsync below.
+        cts?.Cancel();
+        cts?.Dispose();
+        cts = new CancellationTokenSource();
+
+        var userMessage = input;
+        input = "";
+        messages.Add(new ChatEntry(IsUser: true, Text: userMessage));
+        var assistantEntry = new ChatEntry(IsUser: false, Text: "");
+        messages.Add(assistantEntry);
+        isStreaming = true;
+
+        try
+        {
+            await foreach (var update in ChatSession.SendAsync(userMessage, cts.Token))
+            {
+                if (!string.IsNullOrEmpty(update.Text))
+                {
+                    assistantEntry.Text += update.Text;
+                }
+
+                activityLog.AddRange(SkillActivityExtractor.Extract(update));
+
+                // The await foreach continuation runs off the Blazor sync context — every state mutation
+                // needs to go back through InvokeAsync to actually re-render (docs/spec.md §7).
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer send, or the component was disposed — not an error.
+        }
+        catch (Exception ex)
+        {
+            assistantEntry.Text = $"(error: {ex.Message})";
+        }
+        finally
+        {
+            isStreaming = false;
+            // DisposeAsync (navigating away mid-stream) cancels the CTS, which unwinds the loop above
+            // through the OperationCanceledException branch and lands here — InvokeAsync on an
+            // already-disposed component/renderer throws, so guard it rather than let that escape into
+            // the circuit.
+            if (!disposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task OnInputKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+        {
+            await SendAsync();
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        disposed = true;
+        cts?.Cancel();
+        cts?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private sealed class ChatEntry(bool IsUser, string Text)
+    {
+        public bool IsUser { get; } = IsUser;
+        public string Text { get; set; } = Text;
+    }
+}

@@ -1,0 +1,31 @@
+@using FinanceApp.AI
+
+<MudPaper Class="pa-4" Style="height:60vh; overflow-y:auto;">
+    <MudText Typo="Typo.subtitle1" Class="mb-2">Agent Activity</MudText>
+    @if (Entries.Count == 0)
+    {
+        <MudText Typo="Typo.body2" Color="Color.Secondary">No skill activity yet — ask something that needs your data.</MudText>
+    }
+    else
+    {
+        @foreach (var entry in Entries)
+        {
+            <MudChip T="string" Size="Size.Small" Color="ColorFor(entry.ToolName)" Class="ma-1">
+                @entry.ToolName: @entry.SkillName@(entry.Detail is null ? "" : $" ({entry.Detail})")
+            </MudChip>
+        }
+    }
+</MudPaper>
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<SkillActivityEntry> Entries { get; set; } = [];
+
+    private static Color ColorFor(string toolName) => toolName switch
+    {
+        "load_skill" => Color.Info,
+        "run_skill_script" => Color.Success,
+        "read_skill_resource" => Color.Warning,
+        _ => Color.Default,
+    };
+}

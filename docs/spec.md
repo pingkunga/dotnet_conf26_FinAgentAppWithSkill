@@ -193,7 +193,13 @@ memory) to confirm exact package IDs/types before writing this. Same shape: stat
 (`Azure/OpenAI/Ollama/Gemini/Anthropic` constants) and returns `IChatClient`:
 - Azure → `OpenAI.Chat.ChatClient(credential, model, options: new OpenAIClientOptions{Endpoint=...}).AsIChatClient()`
   (package `OpenAI` 2.12.0 + `Microsoft.Extensions.AI.OpenAI` 10.8.3 for `.AsIChatClient()`)
-- OpenAI → `new OpenAIClient(key).GetChatClient(model).AsIChatClient()` (same two packages)
+- OpenAI → `new OpenAIClient(key).GetChatClient(model).AsIChatClient()` (same two packages). `Endpoint` is
+  optional here (unlike Azure, where it's required) — when set, overrides the target via
+  `OpenAIClientOptions.Endpoint` same as the Azure branch, so this engine type also covers any
+  OpenAI-API-compatible local/self-hosted server (LM Studio, vLLM, llama.cpp's server, ...); those don't
+  check the API key server-side, so `ApiKey` can be any non-empty placeholder. **Found missing, fixed
+  2026-08-12**: this branch originally ignored `Endpoint` entirely and always hit the real OpenAI API
+  regardless of config — surfaced as a real 401 testing against a local LM Studio instance.
 - Ollama → `new OllamaApiClient(httpClientWith40MinTimeout){ SelectedModel = model }` (package `OllamaSharp` 5.4.30)
 - Gemini → `new GenerativeAIChatClient(key, model)` (package `Google_GenerativeAI.Microsoft` 3.6.7 — note the
   underscore in the *package id*; its namespace is `GenerativeAI.Microsoft`, no underscore)
@@ -466,19 +472,48 @@ endpoint (or each finance page individually) is protected via `[Authorize]` /
 `.RequireAuthorization()` — every page below except the Account pages themselves requires an
 authenticated user.
 
-**Render mode — global, not per-page (found while implementing `Transactions.razor`/`Budgets.razor`,
-2026-08-10)**: `Components/App.razor`'s `<Routes @rendermode="InteractiveServer" />` sets Interactive
-Server as the app-wide default; `Components/Account/Pages/_Imports.razor`'s `[ExcludeFromInteractiveRouting]`
-(already present from the scaffold copy, §2a point 6) keeps only the Identity pages on static SSR/form-POST,
-exactly the documented pattern for combining ASP.NET Core Identity with a globally-interactive Blazor Web
-App. **Do not** try to fix a "component doesn't work" issue by adding `@rendermode InteractiveServer` to
-just the one page that seems broken — first found that in isolation, it wasn't enough: `MudPopoverProvider`/
-`MudDialogProvider`/`MudSnackbarProvider` (declared once in `MainLayout.razor`, per §-Layout-conventions)
-need to be **inside the same interactive boundary** as any page using a popover-based MudBlazor component
-(`MudSelect`, `MudDatePicker`, `MudMenu`, ...) — per-page `@rendermode` makes that one page's own content
-interactive but leaves the shared layout (and its providers) static, so the popover portal has no JS backing
-and silently does nothing when clicked. The global `<Routes @rendermode="...">` approach avoids this by
-construction: `MainLayout` and every non-excluded page share one interactive boundary.
+**Render mode — per-page + per-provider, NOT global on `<Routes>` (corrected 2026-08-12; an earlier version
+of this note, added 2026-08-10, recommended the opposite and was wrong — left below for the record since
+the failure mode it describes is real and worth knowing).**
+
+**What actually works**: `Components/App.razor`'s `<Routes />` has **no** `@rendermode` — no global default.
+Each page that uses a popover-based MudBlazor component (`MudSelect`, `MudDatePicker`, `MudMenu`, ...)
+declares its own `@rendermode InteractiveServer` as the line right after `@page` (`Transactions.razor`,
+`Budgets.razor`, `Chat.razor`). `MainLayout.razor`'s three providers each carry their own explicit
+rendermode instead of inheriting one:
+```razor
+<MudPopoverProvider @rendermode="InteractiveServer" />
+<MudDialogProvider @rendermode="InteractiveServer" />
+<MudSnackbarProvider @rendermode="InteractiveServer" />
+```
+This is the pattern a MudBlazor maintainer gives directly for this exact combination (`MudBlazor/MudBlazor`
+issue #12192): *"you need to specify pages yourself that you want to be interactive, also the providers go
+on individual pages rather than in the main layout."* Each provider becomes its own interactive island,
+available to whichever page opts in, without requiring the whole app (including Identity's static pages) to
+share one interactive boundary. `Components/Account/Pages/_Imports.razor`'s `[ExcludeFromInteractiveRouting]`
+(scaffold default, §2a point 6) is kept as documentation of intent but isn't what's doing the work here —
+Identity pages are static simply because nothing gives them a rendermode, same as the framework default.
+
+**What the earlier "global on `<Routes>`" version of this note got wrong, and why it looked verified at the
+time**: setting `@rendermode="InteractiveServer"` globally on `<Routes>` *does* fix the popover-provider
+problem (that half of the original diagnosis was correct) — but it also breaks every static-SSR page sharing
+that same `<Routes>` tree, **including the Identity Login/Register pages**, in a way that is invisible to
+`curl`-based testing. Symptom (confirmed live, matches `dotnet/aspnetcore` issue #58944 exactly): the page's
+*initial* response renders correctly — a plain HTTP GET/POST (curl, no JS) always sees the right content,
+which is exactly what made the earlier fix look confirmed. But once a real browser's `blazor.web.js` boots
+and the SignalR circuit actually connects (a couple of seconds after page load, or immediately for a
+same-tab navigation), the circuit re-evaluates routing and — because these pages are `[ExcludeFromInteractiveRouting]`
+but the *whole* `<Routes>` tree is now interactive by default — flips the rendered content to the app's own
+`NotFound.razor` fallback. Reported by the user as "Login/Register ใช้ไม่ได้"; reproduced even in a fresh
+Incognito window with a hard refresh (ruling out cache/stale-circuit causes), and confirmed via direct curl
+GET/POST to the user's own running process returning correct 200/302 the whole time — proving the break was
+real but specifically **not observable by any test this session had been using**.
+
+**Standing lesson, not just about this one bug**: curl/HTTP-only testing (used throughout this project to
+"verify" UI changes when no browser tool was available) cannot detect any bug whose symptom only appears
+*after* a SignalR circuit connects — it can confirm the static/prerendered response is correct and nothing
+more. Any future render-mode-adjacent change needs either a real browser test or an explicit caveat that the
+circuit-connect behavior is unverified, not a claim of "confirmed working" based on curl alone.
 
 `src/FinanceApp.Web/Components/Pages/`:
 - **`Transactions.razor`** — plain CRUD grid over `Transaction`, direct repository calls, no agent
@@ -492,15 +527,40 @@ construction: `MainLayout` and every non-excluded page share one interactive bou
   default `OpenReadStream` cap is 512 KB and will throw/truncate without this), image preview, "Extract
   with AI" button disabled with a tooltip when `AI:SupportsVision` is false (manual entry fields shown
   instead).
-- **`Chat.razor`** — the demo centerpiece: freeform chat wired to `ChatSessionService` (builds one
-  `AIAgent` per Blazor circuit), streams the response, and renders an **`AgentActivityLog`** side panel.
-  The activity log works by inspecting the streamed `AgentRunResponseUpdate` sequence for
+- **`Chat.razor`** — **implemented 2026-08-11**, the demo centerpiece: freeform chat wired to
+  `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per Blazor circuit — only `BudgetSkill`
+  wired so far, the other 3 skill sources don't exist yet, see §4.2/§4.3/§4.4), streams the response, and
+  renders an **`AgentActivityLog`** side panel via `FinanceApp.AI.SkillActivityExtractor`.
+
+  **API correction, found via a reflection dump + a hand-rolled `IChatClient` round-trip spike against the
+  real package (2026-08-11, not from spec's original guess)**: the run/streaming surface is
+  `agent.CreateSessionAsync()` → `AgentSession` and `agent.RunStreamingAsync(message, session, ...)` →
+  `IAsyncEnumerable<AgentResponseUpdate>` — **not** `AgentThread`/`AgentRunResponseUpdate` as originally
+  written here. The activity log works by inspecting each `AgentResponseUpdate.Contents` for
   `FunctionCallContent` items named `load_skill` / `read_skill_resource` / `run_skill_script` (the three
-  tools `AgentSkillsProvider` registers) and pushing them into an `ObservableCollection<SkillActivityEntry>`
-  that the `AgentActivityLog.razor` component renders, using `InvokeAsync(StateHasChanged)` since the
-  stream is consumed off the Blazor sync context. Each send allocates a per-circuit
-  `CancellationTokenSource`, cancelled on new-message-sent or component dispose, so a stale streaming
-  response can't mutate UI state after navigation away.
+  static `AgentSkillsProvider.LoadSkillToolName`/`ReadSkillResourceToolName`/`RunSkillScriptToolName`
+  constants — values confirmed by construction, exactly those strings) — `SkillActivityExtractor.Extract`
+  (`FinanceApp.AI/SkillActivity.cs`) does this, unit-tested end-to-end against a real `AgentClassSkill`
+  driven through a scripted fake `IChatClient` (`tests/FinanceApp.AI.Tests/SkillActivityExtractorTests.cs`)
+  — confirms both `FunctionCallContent` and its matching `FunctionResultContent` are surfaced in the stream
+  (neither is `InformationalOnly`-suppressed), so the streaming design here is sound.
+
+  **Real gap the original design missed, found by the same spike**: skill tool calls
+  (`load_skill`/`read_skill_resource`/`run_skill_script`) require **approval by default** — without
+  disabling it, the stream silently emits a `ToolApprovalRequestContent` and just stops (no exception; a
+  chat that looks permanently "stuck," not a crash). This app has no approval UI, so
+  `ChatSessionService` disables all three via
+  `AgentSkillsProviderBuilder.UseOptions(o => { o.DisableLoadSkillApproval = true;
+  o.DisableReadSkillResourceApproval = true; o.DisableRunSkillScriptApproval = true; })` — every script is
+  already hard-scoped to the `userId` captured at agent-build time regardless (§2a point 7), so the
+  approval gate would only ever have been a no-op confirmation, not a real security boundary.
+
+  Implementation: pushes entries into a plain `List<SkillActivityEntry>` (not `ObservableCollection` — the
+  list is only ever mutated from the `await foreach` loop, which already routes every mutation through
+  `InvokeAsync(StateHasChanged)` since it runs off the Blazor sync context; `ObservableCollection` would add
+  nothing here). Each send allocates a per-circuit `CancellationTokenSource` held by the **component**
+  (not the service), cancelled on new-message-sent and on `DisposeAsync`, so a stale streaming response
+  can't mutate a disposed component's state.
 
 ---
 
@@ -597,8 +657,9 @@ feature; that surface area was unused complexity, not a security decision. If ev
 - ~~`src/FinanceApp.Skills/Budgeting/BudgetSkill.cs`~~ — **done**, + `BudgetRepository.cs` (Core) + unit tests (§4.1)
 - ~~`src/FinanceApp.AI/ChatClientFactory.cs`~~ — **done**, ported multi-provider factory + `AiOptions.cs`,
   unit-tested (`tests/FinanceApp.AI.Tests`), wired as `IChatClient`/`IAgentFactory` singletons in
-  `Web/Program.cs` (§3.1/§3.2) — **next up**: `ChatSessionService` (per-conversation `AIAgent`, §3.4),
-  the other 3 skills, MCP server
+  `Web/Program.cs` (§3.1/§3.2)
+- ~~`src/FinanceApp.Web/Services/ChatSessionService.cs`~~ — **done**, + `Chat.razor`/`AgentActivityLog.razor`
+  + `FinanceApp.AI/SkillActivity.cs`, unit-tested (§3.4/§7) — **next up**: the other 3 skills, MCP server
 - `src/FinanceApp.McpServer/Program.cs` — stdio MCP server; must never write to stdout (§5)
 - `src/FinanceApp.Web/Services/McpServerLauncher.cs` — subprocess lifecycle + graceful degradation (§5)
 - ~~`src/FinanceApp.Core/FinanceDbContext.cs`~~ — **done** (§2/§2a/§5)

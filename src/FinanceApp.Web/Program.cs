@@ -88,6 +88,10 @@ builder.Services.AddSingleton<IChatClient>(sp =>
 });
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 
+// ChatSessionService is scoped, not singleton — one AIAgent/AgentSession per Blazor circuit, because the
+// skills it wires (BudgetSkill) close over DB-backed services (docs/spec.md §3.4).
+builder.Services.AddScoped<ChatSessionService>();
+
 var app = builder.Build();
 
 // docs/spec.md §6.4 — Web owns all migrations; McpServer is read-only against the same DB.
