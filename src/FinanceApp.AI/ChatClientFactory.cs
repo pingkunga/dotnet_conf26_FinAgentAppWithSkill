@@ -65,7 +65,18 @@ public static class ChatClientFactory
         RequireModelName(options);
         RequireApiKey(options);
 
-        return new OpenAIClient(options.ApiKey!).GetChatClient(options.ModelName).AsIChatClient();
+        // Endpoint is optional here (unlike Azure, where it's required) — omitted, this hits the real
+        // OpenAI API as before. Set it to point at any OpenAI-API-compatible local/self-hosted server
+        // instead (LM Studio, vLLM, llama.cpp's server, ...); those don't check the API key server-side,
+        // so ApiKey can be any non-empty placeholder (LM Studio's own docs suggest "lm-studio").
+        // Found missing (and fixed) after a real 401 against LM Studio, 2026-08-12 — this branch
+        // previously ignored AiOptions.Endpoint entirely and always hit api.openai.com regardless.
+        var clientOptions = string.IsNullOrEmpty(options.Endpoint)
+            ? null
+            : new OpenAIClientOptions { Endpoint = new Uri(options.Endpoint) };
+
+        return new OpenAIClient(new ApiKeyCredential(options.ApiKey!), clientOptions)
+            .GetChatClient(options.ModelName).AsIChatClient();
     }
 
     private static IChatClient CreateOllama(AiOptions options)
