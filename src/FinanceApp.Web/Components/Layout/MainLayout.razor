@@ -4,9 +4,17 @@
 @inject NavigationManager NavigationManager
 
 <MudThemeProvider />
-<MudPopoverProvider />
-<MudDialogProvider />
-<MudSnackbarProvider />
+@*
+    Each provider gets its own explicit rendermode attribute, not inherited from a global default on
+    Routes — that global-default approach broke Identity's static SSR pages (docs/spec.md §7: they render
+    correctly once, then flip to Not Found ~2-3s later once the SignalR circuit connects — invisible to
+    curl-based testing since curl never lets a circuit connect). This way each provider is its own
+    interactive island, available to whichever page opts into interactive rendering, without dragging
+    MainLayout's other consumers (the static Identity pages) into an interactive boundary they can't survive.
+*@
+<MudPopoverProvider @rendermode="InteractiveServer" />
+<MudDialogProvider @rendermode="InteractiveServer" />
+<MudSnackbarProvider @rendermode="InteractiveServer" />
 
 <MudLayout>
     <MudAppBar Elevation="1">
