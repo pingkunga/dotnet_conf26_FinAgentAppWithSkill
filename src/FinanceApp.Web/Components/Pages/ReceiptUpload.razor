@@ -1,0 +1,231 @@
+@page "/Receipts"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@using FinanceApp.AI
+@using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Entities
+@using FinanceApp.Web.Services
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.EntityFrameworkCore
+@inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
+@inject ISnackbar Snackbar
+@inject NavigationManager Nav
+@inject ChatSessionService ChatSession
+@inject AiOptions AiOptions
+
+<PageTitle>Receipts</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-4">Receipts</MudText>
+
+<MudPaper Class="pa-4 mb-4">
+    @* Blazor's default IBrowserFile.OpenReadStream cap is 512 KB — an explicit, generous maxAllowedSize
+       override below is required or a real photo upload throws (docs/spec.md §4.2/§7). *@
+    <InputFile OnChange="OnFileSelectedAsync" accept="image/*" disabled="@uploading" />
+    @if (uploading)
+    {
+        <MudProgressCircular Indeterminate="true" Size="Size.Small" Class="ml-2" />
+    }
+    @if (!AiOptions.SupportsVision)
+    {
+        <MudAlert Severity="Severity.Info" Class="mt-2">
+            The configured AI provider doesn't support image input — extracted fields won't be filled in
+            automatically. Enter them manually below after uploading.
+        </MudAlert>
+    }
+</MudPaper>
+
+@if (previewDataUrl is not null && currentReceipt is not null)
+{
+    <MudPaper Class="pa-4 mb-4">
+        <MudGrid>
+            <MudItem xs="12" sm="4">
+                <MudImage Src="@previewDataUrl" Width="300" Class="rounded" />
+            </MudItem>
+            <MudItem xs="12" sm="8">
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Class="mb-4"
+                           Disabled="@(!AiOptions.SupportsVision)"
+                           OnClick="@(() => Nav.NavigateTo($"/Chat?receiptId={currentReceipt.Id}"))">
+                    Extract with AI
+                </MudButton>
+                @if (!AiOptions.SupportsVision)
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+                        Disabled — this provider can't read images. Fill in the fields manually instead.
+                    </MudText>
+                    <EditForm Model="this" OnValidSubmit="SaveManuallyAsync">
+                        <MudGrid>
+                            <MudItem xs="12" sm="4">
+                                <MudTextField @bind-Value="manualVendor" Label="Vendor" />
+                            </MudItem>
+                            <MudItem xs="12" sm="3">
+                                <MudNumericField T="decimal" @bind-Value="manualAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
+                            </MudItem>
+                            <MudItem xs="12" sm="3">
+                                <MudSelect T="Guid?" @bind-Value="manualCategoryId" Label="Category" Required="true">
+                                    @foreach (var c in categories)
+                                    {
+                                        <MudSelectItem Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                                    }
+                                </MudSelect>
+                            </MudItem>
+                            <MudItem xs="12" sm="2">
+                                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Secondary" FullWidth="true">
+                                    Save
+                                </MudButton>
+                            </MudItem>
+                        </MudGrid>
+                    </EditForm>
+                }
+            </MudItem>
+        </MudGrid>
+    </MudPaper>
+}
+
+<MudTable Items="receipts" Hover="true" Loading="loadingList">
+    <HeaderContent>
+        <MudTh>Uploaded</MudTh>
+        <MudTh>Status</MudTh>
+        <MudTh>Vendor</MudTh>
+        <MudTh>Amount</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Uploaded">@context.UploadedAtUtc.ToLocalTime().ToString("g")</MudTd>
+        <MudTd DataLabel="Status">
+            <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.OcrStatus)">@context.OcrStatus</MudChip>
+        </MudTd>
+        <MudTd DataLabel="Vendor">@(context.ExtractedVendor ?? "—")</MudTd>
+        <MudTd DataLabel="Amount">@(context.ExtractedAmount?.ToString("C") ?? "—")</MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        <MudText>No receipts uploaded yet.</MudText>
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    // 10 MB — comfortably above a typical phone-camera receipt photo; Blazor's own default (512 KB) would
+    // throw on essentially any real upload.
+    private const long MaxReceiptBytes = 10 * 1024 * 1024;
+
+    private List<Category> categories = [];
+    private List<Receipt> receipts = [];
+    private bool loadingList = true;
+    private bool uploading;
+
+    private Receipt? currentReceipt;
+    private string? previewDataUrl;
+
+    private string manualVendor = "";
+    private decimal manualAmount;
+    private Guid? manualCategoryId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+        await LoadReceiptsAsync();
+    }
+
+    private async Task LoadReceiptsAsync()
+    {
+        loadingList = true;
+        receipts = await Db.Receipts.OrderByDescending(r => r.UploadedAtUtc).ToListAsync();
+        loadingList = false;
+    }
+
+    private async Task OnFileSelectedAsync(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file is null)
+        {
+            return;
+        }
+
+        uploading = true;
+        try
+        {
+            using var stream = file.OpenReadStream(MaxReceiptBytes);
+            using var memory = new MemoryStream();
+            await stream.CopyToAsync(memory);
+            var bytes = memory.ToArray();
+
+            var receipt = new Receipt
+            {
+                Id = Guid.NewGuid(),
+                UserId = CurrentUser.UserId!.Value,
+                ImageBytes = bytes,
+                ContentType = file.ContentType,
+                UploadedAtUtc = DateTime.UtcNow,
+                OcrStatus = ReceiptOcrStatus.Pending,
+            };
+            Db.Receipts.Add(receipt);
+            await Db.SaveChangesAsync();
+
+            // Registers the per-receipt inline skill into the (possibly already-running) chat session —
+            // safe to call before Chat.razor has ever been visited; the skill just sits in the list until
+            // an agent exists (docs/spec.md §4.2).
+            ChatSession.RegisterReceiptSkill(receipt.Id);
+
+            currentReceipt = receipt;
+            previewDataUrl = $"data:{receipt.ContentType};base64,{Convert.ToBase64String(bytes)}";
+            manualVendor = "";
+            manualAmount = 0;
+            manualCategoryId = null;
+
+            await LoadReceiptsAsync();
+        }
+        catch (IOException)
+        {
+            Snackbar.Add($"File too large — the limit is {MaxReceiptBytes / 1024 / 1024} MB.", Severity.Error);
+        }
+        finally
+        {
+            uploading = false;
+        }
+    }
+
+    private async Task SaveManuallyAsync()
+    {
+        if (currentReceipt is null || manualAmount <= 0 || manualCategoryId is null)
+        {
+            Snackbar.Add("Enter an amount and pick a category.", Severity.Warning);
+            return;
+        }
+
+        var transaction = new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = CurrentUser.UserId!.Value,
+            CategoryId = manualCategoryId.Value,
+            Amount = manualAmount,
+            OccurredOn = DateOnly.FromDateTime(DateTime.UtcNow),
+            Description = string.IsNullOrWhiteSpace(manualVendor) ? null : manualVendor,
+            Source = TransactionSource.Manual,
+            ReceiptId = currentReceipt.Id,
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        Db.Transactions.Add(transaction);
+
+        var receipt = await Db.Receipts.FirstAsync(r => r.Id == currentReceipt.Id);
+        receipt.OcrStatus = ReceiptOcrStatus.Unsupported;
+        receipt.ExtractedVendor = manualVendor;
+        receipt.ExtractedAmount = manualAmount;
+        receipt.ExtractedCategoryId = manualCategoryId;
+        receipt.ResultingTransactionId = transaction.Id;
+
+        await Db.SaveChangesAsync();
+
+        currentReceipt = null;
+        previewDataUrl = null;
+        await LoadReceiptsAsync();
+        Snackbar.Add("Transaction recorded.", Severity.Success);
+    }
+
+    private static Color StatusColor(ReceiptOcrStatus status) => status switch
+    {
+        ReceiptOcrStatus.Succeeded => Color.Success,
+        ReceiptOcrStatus.Failed => Color.Error,
+        ReceiptOcrStatus.Unsupported => Color.Default,
+        _ => Color.Warning,
+    };
+}

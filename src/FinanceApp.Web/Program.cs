@@ -73,10 +73,14 @@ builder.Services.AddSingleton<IEmailSender<ApplicationUser>, IdentityNoOpEmailSe
 // FinanceApp.AI.Tests' ConfigurationBinder_DoesNotMatchUnderscoredKeysToPascalCaseProperties (only
 // ENDPOINT, which has no underscore, binds correctly by accident). IChatClient is a singleton — thread-safe
 // and relatively expensive to construct, no per-request state (docs/spec.md §3.2).
-builder.Services.AddSingleton<IChatClient>(sp =>
+// Registered as its own singleton (not just built-and-discarded inside the IChatClient factory below) so
+// AiOptions.SupportsVision is resolvable elsewhere — ReceiptUpload.razor gates its "Extract with AI" button
+// on it, and ChatSessionService.RegisterReceiptSkillAsync passes it to ReceiptOcrSkillFactory.Create
+// (docs/spec.md §4.2).
+builder.Services.AddSingleton(sp =>
 {
     var aiSection = builder.Configuration.GetSection(AiOptions.SectionName);
-    var aiOptions = new AiOptions
+    return new AiOptions
     {
         EngineType = aiSection["ENGINE_TYPE"] ?? "",
         Endpoint = aiSection["ENDPOINT"],
@@ -84,8 +88,8 @@ builder.Services.AddSingleton<IChatClient>(sp =>
         ApiKey = aiSection["API_KEY"],
         SupportsVision = bool.TryParse(aiSection["SUPPORTS_VISION"], out var supportsVision) && supportsVision,
     };
-    return ChatClientFactory.CreateChatClient(aiOptions);
 });
+builder.Services.AddSingleton<IChatClient>(sp => ChatClientFactory.CreateChatClient(sp.GetRequiredService<AiOptions>()));
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 
 // ChatSessionService is scoped, not singleton — one AIAgent/AgentSession per Blazor circuit, because the

@@ -58,6 +58,13 @@
     [SupplyParameterFromQuery(Name = "goalId")]
     public Guid? GoalId { get; set; }
 
+    // ReceiptUpload.razor's "Extract with AI" button navigates here as /Chat?receiptId=<guid>, same shape
+    // as ?goalId= above (docs/spec.md §4.2/§7) — the receipt-OCR inline skill is already registered into
+    // this session by ChatSessionService.RegisterReceiptSkill at upload time; this just pre-fills a prompt
+    // asking the agent to run it.
+    [SupplyParameterFromQuery(Name = "receiptId")]
+    public Guid? ReceiptId { get; set; }
+
     private readonly List<ChatEntry> messages = [];
     private readonly List<SkillActivityEntry> activityLog = [];
     private string input = "";
@@ -67,27 +74,36 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (GoalId is not { } goalId)
+        // Pre-filled, not auto-sent, in both cases below — the user still presses Send.
+        // OnInitializedAsync can run twice on an interactive page with prerendering, and there's no LLM
+        // available in this environment to verify an auto-sent round trip against.
+        if (GoalId is { } goalId)
         {
-            return;
+            var goal = await Db.SavingsGoals.FindAsync(goalId);
+            if (goal is not null)
+            {
+                // Not this user's goal (query-filtered out) or it doesn't exist — say nothing rather than
+                // reveal which case it was.
+                input = $"I have a savings goal called \"{goal.Name}\": current amount {goal.CurrentAmount:C}, " +
+                        $"target amount {goal.TargetAmount:C}" +
+                        (goal.TargetDate is { } targetDate ? $", target date {targetDate:d}" : "") +
+                        (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {contribution:C}" : "") +
+                        ". Give me guidance on this goal, and an exact projection if you can.";
+            }
         }
-
-        var goal = await Db.SavingsGoals.FindAsync(goalId);
-        if (goal is null)
+        else if (ReceiptId is { } receiptId)
         {
-            // Not this user's goal (query-filtered out) or it doesn't exist — say nothing rather than
-            // reveal which case it was.
-            return;
+            var receipt = await Db.Receipts.FindAsync(receiptId);
+            if (receipt is not null)
+            {
+                // Names the exact skill, not just "the receipt I uploaded" — every dynamically-registered
+                // receipt skill has the same description (ReceiptOcrSkillFactory.Create), so if more than
+                // one receipt is pending in this session, only the exact name in the prompt disambiguates
+                // which load_skill call is the right one.
+                input = $"Please load the skill named \"receipt-ocr-{receipt.Id:N}\" and run its " +
+                        "extract_receipt script to OCR this receipt and record it as a transaction.";
+            }
         }
-
-        // Pre-filled, not auto-sent — the user still presses Send. OnInitializedAsync can run twice on an
-        // interactive page with prerendering, and there's no LLM available in this environment to verify
-        // an auto-sent round trip against.
-        input = $"I have a savings goal called \"{goal.Name}\": current amount {goal.CurrentAmount:C}, " +
-                $"target amount {goal.TargetAmount:C}" +
-                (goal.TargetDate is { } targetDate ? $", target date {targetDate:d}" : "") +
-                (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {contribution:C}" : "") +
-                ". Give me guidance on this goal, and an exact projection if you can.";
     }
 
     private async Task SendAsync()

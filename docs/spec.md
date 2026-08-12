@@ -354,7 +354,7 @@ draft of this section) is **not used** — it was tried and found to conflict wi
   same in-memory "database", different `userId`s) as the concrete instance of the §2a point 7 check for
   this skill.
 
-### 4.2 Receipt OCR → Code-defined inline skill
+### 4.2 Receipt OCR → Code-defined inline skill (implemented 2026-08-12)
 `src/FinanceApp.Skills/ReceiptOcr/ReceiptOcrSkillFactory.cs` — **not** a static instance; built per
 request/upload so it can close over the specific `Receipt` and the current DI-scoped `IChatClient`:
 ```csharp
@@ -369,6 +369,48 @@ for Azure/OpenAI/Gemini/Anthropic and **false** for Ollama (most local models ar
 operator can flip it if they've pulled a vision model like `llama3.2-vision`. When false, the skill's
 script returns a "please enter manually" message and `ReceiptUpload.razor` disables the AI-extract button
 in favor of manual entry fields — graceful degradation, not a crash.
+
+**API surface, verified via live spikes against `Microsoft.Agents.AI` 1.17.0 (spec's own "verify at
+implementation time" item, now closed)**:
+- `AgentInlineSkill`'s real shape: `new AgentInlineSkill(name, description, instructions, license,
+  compatibility, allowedTools, metadata, serializerOptions, argumentMarshaler)`, then
+  `.AddScript(name, Delegate, description, serializerOptions)` (fluent) to register callable scripts.
+  **Unlike a file skill**, both the script's description and a real JSON Schema derived from the delegate's
+  parameters are surfaced in `load_skill`'s `<available_scripts>` block — confirmed via a round trip
+  (`{"type":"object","properties":{...},"required":[...]}`, plus the description string, both present;
+  file skills only ever showed a generic array-of-strings schema and no description at all). Arguments
+  arrive as a JSON **object** keyed by parameter name, not a positional array.
+- Calling a script's `RunAsync` directly (bypassing the normal tool-call pipeline, as
+  `ReceiptOcrSkillFactoryTests` does) returns the result **JSON-serialized as a `JsonElement`**, not the
+  raw C# value the delegate returned — found because a test asserting `IsType<string>` failed and had to
+  be corrected to unwrap `JsonElement.GetString()` instead.
+
+**Dynamic mid-session skill registration** — the real design problem this skill exposed: it must be built
+*after* `ChatSessionService`'s agent/session already exist (one receipt upload can happen well into an
+ongoing chat), but rebuilding the agent to add it would discard the running `AgentSession`'s history.
+Verified via a live spike: `AgentSkillsProviderBuilder.UseSource(...)` combined with `.DisableCaching()`
+makes the framework re-invoke `AgentSkillsSource.GetSkillsAsync(...)` **on every turn**, not once at
+agent-build time — a skill appended to a plain mutable `List<AgentSkill>` mid-conversation was visible to
+`load_skill` on the very next turn, no agent/session rebuild needed. `ChatSessionService.RegisterReceiptSkill`
+(not "…Async" — nothing in it actually awaits; the OCR work happens later, inside the script, when the
+agent calls it) appends to that list; a private `DynamicInlineSkillsSource : AgentSkillsSource` reads it
+live. **Accepted cost**: `.DisableCaching()` is builder-wide, so `savings-goals`/`savings-calculator`'s file
+discovery loses its cache too and re-scans disk every turn instead of once — trivial at this app's scale.
+
+**Disambiguating multiple pending receipts**: each upload gets its own skill, named
+`receipt-ocr-{receiptId:N}`, with an identical description across all of them (from
+`ReceiptOcrSkillFactory.Create`) — if more than one receipt is `Pending` in the same session, the model has
+no way to tell them apart from the skill list alone. `Chat.razor`'s pre-filled prompt (below) names the
+exact skill, not just "the receipt I uploaded", to remove that ambiguity structurally rather than relying
+on the model guessing right.
+
+**Extraction/category logic**: the multimodal prompt asks for `{"vendor", "amount", "date", "category"}` as
+a single JSON object; parsing is deliberately tolerant (`TryParseExtraction`) — a missing/malformed field
+just stays `null` rather than throwing, so a bad OCR read degrades to `ReceiptOcrStatus.Failed` with
+`OcrRawResponse` preserved for debugging, not a skill-script exception. Category matching reuses
+`BudgetSkill.FindCategoryAsync`'s exact case-insensitive-name shape (not a new algorithm), falling back to
+`SeedData.OtherCategoryId` when the model's guessed category doesn't match any of the user's real
+categories.
 
 ### 4.3 Savings/Investment Goals → File-based skill (implemented 2026-08-12)
 
@@ -593,19 +635,29 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
   `HasQueryFilter(g => g.UserId == _currentUserId)` is what actually enforces isolation (a hand-edited guid
   for someone else's goal just resolves to nothing) rather than any new logic on this page. Pre-fills
   `Chat.razor`'s input; does not auto-send (see below).
-- **`ReceiptUpload.razor`** — `InputFile` with an **explicit, generous `maxAllowedSize`** override (Blazor's
-  default `OpenReadStream` cap is 512 KB and will throw/truncate without this), image preview, "Extract
-  with AI" button disabled with a tooltip when `AI:SupportsVision` is false (manual entry fields shown
-  instead).
-- **`Chat.razor`** — **implemented 2026-08-11**, the demo centerpiece: freeform chat wired to
-  `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per Blazor circuit — `BudgetSkill` plus the
-  `savings-goals`/`savings-calculator` file skills are wired now, §4.3; inline receipt-OCR and the MCP
-  monthly-summary skill still don't exist, see §4.2/§4.4), streams the response, and renders an
-  **`AgentActivityLog`** side panel via `FinanceApp.AI.SkillActivityExtractor`. Also accepts
-  `?goalId=<guid>` from `Goals.razor`'s handoff (above) via `[SupplyParameterFromQuery]`, read in
-  `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real goal —
-  deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page with
-  prerendering and there's no LLM available in this environment to verify an auto-sent round trip against.
+- **`ReceiptUpload.razor`** (routed `/Receipts`) — **implemented 2026-08-12.** `InputFile` with an
+  **explicit, generous `maxAllowedSize`** override (10 MB — Blazor's default `OpenReadStream` cap is
+  512 KB and will throw/truncate without this), image preview, a table of the user's past receipts with
+  status. On upload: saves the `Receipt` row, then calls
+  `ChatSessionService.RegisterReceiptSkill(receiptId)` (§4.2) so the receipt-OCR skill exists before the
+  user ever navigates to `Chat.razor`. "Extract with AI" button — disabled with explanatory text when
+  `AiOptions.SupportsVision` is false — navigates to `/Chat?receiptId={id}` (same handoff shape as
+  `Goals.razor`'s `?goalId=`). When vision isn't supported, manual entry fields (vendor/amount/category)
+  are shown instead, submitted as a plain `Transaction` write with `Source = Manual` and
+  `Receipt.OcrStatus = Unsupported` — no agent involved, matching `Transactions.razor`'s precedent.
+- **`Chat.razor`** — **implemented 2026-08-11, extended 2026-08-12 for receipt handoff**, the demo
+  centerpiece: freeform chat wired to `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per
+  Blazor circuit — `BudgetSkill`, the `savings-goals`/`savings-calculator` file skills, and dynamically-
+  registered receipt-OCR skills are all wired now, §4.1/§4.3/§4.2; only the MCP monthly-summary skill still
+  doesn't exist, see §4.4), streams the response, and renders an **`AgentActivityLog`** side panel via
+  `FinanceApp.AI.SkillActivityExtractor`. Also accepts `?goalId=<guid>` from `Goals.razor`'s handoff and
+  `?receiptId=<guid>` from `ReceiptUpload.razor`'s (above) via `[SupplyParameterFromQuery]`, read in
+  `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real
+  goal/receipt — deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page
+  with prerendering and there's no LLM available in this environment to verify an auto-sent round trip
+  against. The receipt prompt names the exact dynamically-registered skill (`receipt-ocr-{id:N}`), not just
+  "the receipt I uploaded" — necessary because every such skill shares the same description, so if more
+  than one receipt is pending in the same session only the exact name disambiguates which one to load.
 
   **API correction, found via a reflection dump + a hand-rolled `IChatClient` round-trip spike against the
   real package (2026-08-11, not from spec's original guess)**: the run/streaming surface is
