@@ -584,16 +584,28 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
 - **`Budgets.razor`** — CRUD over `Budget` + per-category progress bars, computed via the *same* shared
   method `BudgetSkill.CheckBudgetStatusAsync` uses (factored onto `BudgetRepository` in `Core` so the UI
   and the skill can never drift apart).
-- **`Goals.razor`** — CRUD over `SavingsGoal`, plus a "get guidance" action that routes into `Chat.razor`
-  with a pre-filled prompt targeting the savings-goals skill.
+- **`Goals.razor`** — **implemented 2026-08-12.** Plain CRUD over `SavingsGoal` (direct `Db.SavingsGoals`
+  access, no repository — nothing here is shared with a skill the way `BudgetRepository` is shared with
+  `BudgetSkill`), plus a per-row "Get guidance" button. `savings-goals`/`savings-calculator` are file-based
+  skills with **no DB access of their own** (unlike `BudgetSkill`'s `scopeFactory`+`userId`), so the button
+  navigates to `/Chat?goalId={id}` rather than passing a raw prompt string through the URL — `Chat.razor`
+  loads the real goal server-side and builds the prompt from it, so `FinanceDbContext`'s existing
+  `HasQueryFilter(g => g.UserId == _currentUserId)` is what actually enforces isolation (a hand-edited guid
+  for someone else's goal just resolves to nothing) rather than any new logic on this page. Pre-fills
+  `Chat.razor`'s input; does not auto-send (see below).
 - **`ReceiptUpload.razor`** — `InputFile` with an **explicit, generous `maxAllowedSize`** override (Blazor's
   default `OpenReadStream` cap is 512 KB and will throw/truncate without this), image preview, "Extract
   with AI" button disabled with a tooltip when `AI:SupportsVision` is false (manual entry fields shown
   instead).
 - **`Chat.razor`** — **implemented 2026-08-11**, the demo centerpiece: freeform chat wired to
-  `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per Blazor circuit — only `BudgetSkill`
-  wired so far, the other 3 skill sources don't exist yet, see §4.2/§4.3/§4.4), streams the response, and
-  renders an **`AgentActivityLog`** side panel via `FinanceApp.AI.SkillActivityExtractor`.
+  `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per Blazor circuit — `BudgetSkill` plus the
+  `savings-goals`/`savings-calculator` file skills are wired now, §4.3; inline receipt-OCR and the MCP
+  monthly-summary skill still don't exist, see §4.2/§4.4), streams the response, and renders an
+  **`AgentActivityLog`** side panel via `FinanceApp.AI.SkillActivityExtractor`. Also accepts
+  `?goalId=<guid>` from `Goals.razor`'s handoff (above) via `[SupplyParameterFromQuery]`, read in
+  `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real goal —
+  deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page with
+  prerendering and there's no LLM available in this environment to verify an auto-sent round trip against.
 
   **API correction, found via a reflection dump + a hand-rolled `IChatClient` round-trip spike against the
   real package (2026-08-11, not from spec's original guess)**: the run/streaming surface is

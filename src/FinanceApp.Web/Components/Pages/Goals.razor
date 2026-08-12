@@ -1,0 +1,170 @@
+@page "/Goals"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Entities
+@using Microsoft.EntityFrameworkCore
+@inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
+@inject ISnackbar Snackbar
+@inject NavigationManager Nav
+
+<PageTitle>Savings Goals</PageTitle>
+
+<MudText Typo="Typo.h5" Class="mb-4">Savings Goals</MudText>
+
+<MudPaper Class="pa-4 mb-4">
+    <EditForm Model="this" OnValidSubmit="SaveAsync">
+        <MudGrid>
+            <MudItem xs="12" sm="3">
+                <MudTextField @bind-Value="name" Label="Name" Required="true" />
+            </MudItem>
+            <MudItem xs="12" sm="2">
+                <MudNumericField T="decimal" @bind-Value="targetAmount" Label="Target amount" Min="0.01m" Format="F2" Required="true" />
+            </MudItem>
+            <MudItem xs="12" sm="2">
+                <MudNumericField T="decimal" @bind-Value="currentAmount" Label="Current amount" Min="0m" Format="F2" />
+            </MudItem>
+            <MudItem xs="12" sm="2">
+                <MudDatePicker @bind-Date="targetDate" Label="Target date" Editable="true" />
+            </MudItem>
+            <MudItem xs="12" sm="2">
+                <MudNumericField T="decimal?" @bind-Value="monthlyContribution" Label="Monthly contribution" Min="0m" Format="F2" />
+            </MudItem>
+            <MudItem xs="12" sm="1" Class="d-flex align-center">
+                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">
+                    @(editingId is null ? "Add" : "Save")
+                </MudButton>
+            </MudItem>
+        </MudGrid>
+    </EditForm>
+</MudPaper>
+
+<MudTable Items="goals" Hover="true" Loading="loading">
+    <HeaderContent>
+        <MudTh>Name</MudTh>
+        <MudTh>Progress</MudTh>
+        <MudTh>Target date</MudTh>
+        <MudTh>Monthly contribution</MudTh>
+        <MudTh>Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Name">@context.Name</MudTd>
+        <MudTd DataLabel="Progress">
+            @{
+                var percent = context.TargetAmount == 0m ? 0m : Math.Min(context.CurrentAmount / context.TargetAmount * 100m, 100m);
+            }
+            <MudProgressLinear Value="@((double)percent)" Color="Color.Primary" Class="my-1" />
+            @context.CurrentAmount.ToString("C") / @context.TargetAmount.ToString("C")
+        </MudTd>
+        <MudTd DataLabel="Target date">@(context.TargetDate?.ToString("d") ?? "—")</MudTd>
+        <MudTd DataLabel="Monthly contribution">@(context.MonthlyContribution?.ToString("C") ?? "—")</MudTd>
+        <MudTd DataLabel="Actions">
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary" Class="mr-2"
+                       OnClick="@(() => Nav.NavigateTo($"/Chat?goalId={context.Id}"))">
+                Get guidance
+            </MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error" OnClick="@(() => DeleteAsync(context))">Delete</MudButton>
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        <MudText>No savings goals yet.</MudText>
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private List<SavingsGoal> goals = [];
+    private bool loading = true;
+
+    private Guid? editingId;
+    private string name = "";
+    private decimal targetAmount;
+    private decimal currentAmount;
+    private DateTime? targetDate;
+    private decimal? monthlyContribution;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        goals = await Db.SavingsGoals.OrderBy(g => g.TargetDate ?? DateOnly.MaxValue).ToListAsync();
+        loading = false;
+    }
+
+    private void StartEdit(SavingsGoal goal)
+    {
+        editingId = goal.Id;
+        name = goal.Name;
+        targetAmount = goal.TargetAmount;
+        currentAmount = goal.CurrentAmount;
+        targetDate = goal.TargetDate?.ToDateTime(TimeOnly.MinValue);
+        monthlyContribution = goal.MonthlyContribution;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(name) || targetAmount <= 0)
+        {
+            Snackbar.Add("Enter a name and a target amount greater than zero.", Severity.Warning);
+            return;
+        }
+
+        var dateOnly = targetDate is null ? (DateOnly?)null : DateOnly.FromDateTime(targetDate.Value);
+
+        if (editingId is null)
+        {
+            Db.SavingsGoals.Add(new SavingsGoal
+            {
+                Id = Guid.NewGuid(),
+                UserId = CurrentUser.UserId!.Value,
+                Name = name,
+                TargetAmount = targetAmount,
+                CurrentAmount = currentAmount,
+                TargetDate = dateOnly,
+                MonthlyContribution = monthlyContribution,
+                CreatedAtUtc = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            var existing = await Db.SavingsGoals.FirstOrDefaultAsync(g => g.Id == editingId);
+            if (existing is not null)
+            {
+                existing.Name = name;
+                existing.TargetAmount = targetAmount;
+                existing.CurrentAmount = currentAmount;
+                existing.TargetDate = dateOnly;
+                existing.MonthlyContribution = monthlyContribution;
+            }
+        }
+
+        await Db.SaveChangesAsync();
+        ResetForm();
+        await LoadAsync();
+        Snackbar.Add("Goal saved.", Severity.Success);
+    }
+
+    private async Task DeleteAsync(SavingsGoal goal)
+    {
+        Db.SavingsGoals.Remove(goal);
+        await Db.SaveChangesAsync();
+        await LoadAsync();
+        Snackbar.Add("Goal deleted.", Severity.Success);
+    }
+
+    private void ResetForm()
+    {
+        editingId = null;
+        name = "";
+        targetAmount = 0;
+        currentAmount = 0;
+        targetDate = null;
+        monthlyContribution = null;
+    }
+}

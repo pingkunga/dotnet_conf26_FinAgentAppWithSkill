@@ -3,8 +3,11 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @using FinanceApp.AI
+@using FinanceApp.Core
 @using FinanceApp.Web.Services
+@using Microsoft.EntityFrameworkCore
 @inject ChatSessionService ChatSession
+@inject FinanceDbContext Db
 
 <PageTitle>Chat</PageTitle>
 
@@ -46,12 +49,46 @@
 </MudGrid>
 
 @code {
+    // Goals.razor's "Get guidance" button navigates here as /Chat?goalId=<guid> (docs/spec.md §7) — the
+    // savings-goals/savings-calculator skills are file-based with no DB access of their own (unlike
+    // BudgetSkill), so the only way the agent sees real numbers is if this page puts them in the prompt
+    // itself. Loading the goal here, not trusting a prompt string passed through the URL, also means
+    // FinanceDbContext's existing HasQueryFilter(g => g.UserId == _currentUserId) is what actually
+    // enforces isolation — a hand-edited guid for someone else's goal just resolves to nothing.
+    [SupplyParameterFromQuery(Name = "goalId")]
+    public Guid? GoalId { get; set; }
+
     private readonly List<ChatEntry> messages = [];
     private readonly List<SkillActivityEntry> activityLog = [];
     private string input = "";
     private bool isStreaming;
     private bool disposed;
     private CancellationTokenSource? cts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (GoalId is not { } goalId)
+        {
+            return;
+        }
+
+        var goal = await Db.SavingsGoals.FindAsync(goalId);
+        if (goal is null)
+        {
+            // Not this user's goal (query-filtered out) or it doesn't exist — say nothing rather than
+            // reveal which case it was.
+            return;
+        }
+
+        // Pre-filled, not auto-sent — the user still presses Send. OnInitializedAsync can run twice on an
+        // interactive page with prerendering, and there's no LLM available in this environment to verify
+        // an auto-sent round trip against.
+        input = $"I have a savings goal called \"{goal.Name}\": current amount {goal.CurrentAmount:C}, " +
+                $"target amount {goal.TargetAmount:C}" +
+                (goal.TargetDate is { } targetDate ? $", target date {targetDate:d}" : "") +
+                (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {contribution:C}" : "") +
+                ". Give me guidance on this goal, and an exact projection if you can.";
+    }
 
     private async Task SendAsync()
     {
