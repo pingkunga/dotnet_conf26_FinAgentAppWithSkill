@@ -22,4 +22,14 @@
     <ProjectReference Include="..\..\src\FinanceApp.Skills\FinanceApp.Skills.csproj" />
   </ItemGroup>
 
+  <!-- Real skills/savings-calculator content (docs/spec.md §4.3) — SubprocessScriptRunnerTests.cs discovers
+       the real script through the file-skill pipeline to get framework-constructed AgentFileSkillScript
+       instances (AgentFileSkill/AgentFileSkillScript have no public constructor), same reasoning as
+       FinanceApp.Web.csproj's Content item. -->
+  <ItemGroup>
+    <Content Include="..\..\skills\**" LinkBase="skills">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

@@ -45,9 +45,12 @@ MyFinanceWithAgentSkill/
 ├── .editorconfig  .gitignore  .env.example
 ├── docker-compose.yml  docker-compose.override.yml
 ├── skills/                            # file-based skill content (ships inside Web's publish output)
-│   └── savings-goals/
+│   ├── savings-goals/                 # guidance only, no scripts/ (§4.3)
+│   │   ├── SKILL.md
+│   │   └── references/{compound-interest.md, fifty-thirty-twenty.md}
+│   └── savings-calculator/            # script-backed exact math (§4.3)
 │       ├── SKILL.md
-│       └── references/{compound-interest.md, fifty-thirty-twenty.md}
+│       └── scripts/project-savings.py
 ├── src/
 │   ├── FinanceApp.Core/               # domain entities + EF Core DbContext + repositories (shared by Web & McpServer)
 │   ├── FinanceApp.AI/                 # ChatClientFactory + AgentFactory (isolated LLM-provider risk boundary)
@@ -57,8 +60,8 @@ MyFinanceWithAgentSkill/
 ├── docs/
 │   └── spec.md                        # this file
 ├── tests/
-│   ├── FinanceApp.Skills.Tests/       # xUnit — calls BudgetSkill's [AgentSkillScript] methods directly, no LLM
-│   └── FinanceApp.Core.Tests/         # repository/EF Core tests
+│   ├── FinanceApp.Skills.Tests/       # xUnit — BudgetSkill scripts + SubprocessScriptRunner, no LLM/python3
+│   └── FinanceApp.AI.Tests/           # xUnit — ChatClientFactory, SkillActivityExtractor, file-skill round trips
 ```
 
 **Project references**: `Web → Core, AI, Skills` · `McpServer → Core` · `Skills → Core, AI` · nothing
@@ -367,20 +370,80 @@ operator can flip it if they've pulled a vision model like `llama3.2-vision`. Wh
 script returns a "please enter manually" message and `ReceiptUpload.razor` disables the AI-extract button
 in favor of manual entry fields — graceful degradation, not a crash.
 
-### 4.3 Savings/Investment Goals → File-based skill
-`skills/savings-goals/SKILL.md` (YAML frontmatter: `name`, `description`, `license`, `compatibility`) plus
-`references/compound-interest.md` and `references/fifty-thirty-twenty.md` holding the actual guidance text
-— editable without recompiling, which is the stated reason for choosing file-based here.
+### 4.3 Savings/Investment Goals → File-based skill (implemented 2026-08-12)
 
-**Deliberately no `scripts/` subfolder** for this skill — keeps `SubprocessScriptRunner` (and its
-Python/pwsh runtime requirement) out of the Docker image entirely. If chat-driven goal CRUD is needed
-later, add it as a small class-based-skill method instead of a subprocess script.
+**Two cooperating file-based skills**, not one — `skills/savings-goals/` (guidance only) and
+`skills/savings-calculator/` (script-backed exact math), both serving the same feature. The table above
+fixes the *skill type* per feature, not skill count; splitting this way demonstrates both halves of the
+file-based mechanism (this app's whole point is showing off Agent Framework Skills end-to-end) and keeps
+"give advice" and "compute an exact number" as separately-loadable concerns.
 
-**Packaging into Docker**: `skills/` is added to `FinanceApp.Web.csproj` as `Content` items
-(`CopyToPublishDirectory`) pointed at the repo-root `skills/` folder, so both `dotnet publish` and the
-Docker build's `dotnet publish` step carry it into the output automatically — no separate `COPY` line in
-the Dockerfile, and the same relative path (`Skills:FilePath`, default `"skills"` under
-`AppContext.BaseDirectory`) works identically in dev and in the container.
+- `skills/savings-goals/SKILL.md` (YAML frontmatter: `name`, `description`, `license`, `compatibility`)
+  plus `references/compound-interest.md` and `references/fifty-thirty-twenty.md` holding real guidance
+  prose — editable without recompiling, the stated reason for file-based here. **No `scripts/` folder** —
+  this skill is static reference content with nothing to compute.
+- `skills/savings-calculator/SKILL.md` plus `scripts/project-savings.py`, a deterministic
+  monthly-compounding projector — the instructions tell the agent to call the script for any exact number
+  instead of estimating the math itself.
+
+**Correction (2026-08-12): the original "no `scripts/` folder, keeps `SubprocessScriptRunner` out of the
+Docker image" rationale was wrong about why that type doesn't appear here.** `SubprocessScriptRunner` is
+**not** a type shipped in any `Microsoft.Agents.AI*` NuGet package (confirmed absent via reflection over
+every loaded assembly) — but it *is* real, genuine Microsoft sample source, already present in the sister
+project `github.com/pingkunga/gitea-aihook`'s `feature/add_skill` branch at
+`GiteaAiSummarizerNET/Services/SubprocessScriptRunner.cs`, and now ported near-verbatim into
+`FinanceApp.Skills/SubprocessScriptRunner.cs` the same way `ChatClientFactory` was ported from the same
+project. Its `RunAsync` signature matches `AgentFileSkillScriptRunner` exactly: picks an interpreter by
+extension (`.py`→python3, `.js`→node, `.sh`→bash, `.ps1`→pwsh), shells out via `Process.Start`, captures
+stdout/stderr. `savings-goals` avoids `scripts/` because it has nothing to compute, not because the runner
+doesn't exist — `savings-calculator` uses it directly and accepts the resulting Python/interpreter runtime
+dependency.
+
+**Trust boundary, not Harness**: a `Microsoft.Agents.AI.Harness` 1.17.0 spike (reflection + live checks,
+prompted by a "should built-in skills be allowed to run scripts while a hypothetical user-uploaded skill
+never should" question) confirmed `HarnessAgent`'s `ToolApprovalAgentOptions.AutoApprovalRules` is a real
+per-call gate, but only a gate — it decides whether to prompt, not what a script can touch, and anything
+not auto-approved stalls the stream on a `ToolApprovalRequestContent` this app has no UI to resolve (the
+same stall found building `Chat.razor`, §7 below). The policy doesn't need Harness: each
+`.UseFileSkill(...)` registration in `ChatSessionService` already takes its own runner delegate, so
+`savings-goals` gets one that always throws and `savings-calculator` gets `SubprocessScriptRunner.RunAsync`
+directly — trust is structural per registration, no shared gate required. If a future user-upload feature
+ever registers many dynamic paths through one runner instead of two static ones, `AgentFileSkill.Path` (the
+real on-disk directory, not attacker-controllable via an uploaded `SKILL.md`) is the mechanism to check
+against a trusted-root allowlist — not built, just the reach-for-this-when-needed note.
+
+**Two more gotchas found only by live spikes, not documented anywhere upstream**:
+1. `.UseFileSkill(path, options, scriptRunner)` throws `InvalidOperationException` at `.Build()` if
+   `scriptRunner` is null — **even for a skill with no `scripts/` folder at all**, contradicting an
+   official Microsoft devblog that claims omitting it is fine in that case. Every registration needs a real
+   runner; `savings-goals`'s exists purely to satisfy this and always throws if actually invoked.
+2. **A file skill's frontmatter `name` must exactly equal its containing folder's own name, or discovery
+   silently returns zero skills** — no exception, no log, `load_skill` just can't find it. Both
+   `skills/savings-goals` and `skills/savings-calculator` already follow this by naming convention, but it
+   cost a debugging cycle to isolate (a temp test skill folder named e.g. `vanish-skill` with frontmatter
+   `name: temp` discovered nothing, until the two were made to match).
+3. A discovered script's tool-call name is its **relative path including the `scripts/` prefix and file
+   extension** — e.g. `scripts/project-savings.py`, not `project-savings` — confirmed via a live round trip;
+   the bare stem is rejected with "Script '…' not found in skill '…'". `load_skill`'s
+   `<available_scripts>` listing shows the exact string to use; a script's description is never surfaced to
+   the model this way (only its name and a generic `{"type":"array","items":{"type":"string"}}` parameters
+   schema) — all argument-order/meaning documentation has to live in the skill's own prose instructions.
+
+**Dev-machine note**: `python3` was not resolvable on the machine this was implemented on (Windows; `python`
+works via a real 3.12 install, but `python3.exe` only exists as a non-functional Windows-Store
+app-execution-alias stub) — `savings-calculator` is therefore untested end-to-end against a real
+interpreter in this environment. `FileSkillTests`/`SubprocessScriptRunnerTests` (below) stay Docker/
+python3-free by design; only a real run against a live LLM + a machine with `python3` on `PATH` (or the
+container, once it has one, per the note below) exercises the actual subprocess path.
+
+**Packaging into Docker (not yet built — no Dockerfile exists in this repo yet)**: `skills/` is added to
+`FinanceApp.Web.csproj` (and both test projects that discover real skill content) as `Content` items with
+**both** `CopyToOutputDirectory` and `CopyToPublishDirectory` — not `CopyToPublishDirectory` alone as this
+section previously said. `AppContext.BaseDirectory` at run time is `bin/Debug/net10.0/…`, which
+`CopyToPublishDirectory` never populates — found via a spike where `load_skill` silently came back "not
+found" under plain `dotnet run`/`dotnet watch`, indistinguishable from the LLM simply not using the skill.
+Whenever the Dockerfile is written (§6), it must install `python3` for `savings-calculator` to work in the
+container — a real, accepted cost this design no longer avoids.
 
 ### 4.4 Monthly Summary & Advice → MCP-based skill
 Registered via `AgentSkillsProviderBuilder().UseMcpSkills(mcpClient)`, where `mcpClient` comes from the

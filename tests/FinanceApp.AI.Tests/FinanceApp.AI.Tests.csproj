@@ -23,4 +23,12 @@
     <ProjectReference Include="..\..\src\FinanceApp.AI\FinanceApp.AI.csproj" />
   </ItemGroup>
 
+  <!-- Real skills/ content (docs/spec.md §4.3), so FileSkillTests.cs exercises actual SKILL.md/references
+       files instead of a throwaway copy — same reasoning as FinanceApp.Web.csproj's Content item. -->
+  <ItemGroup>
+    <Content Include="..\..\skills\**" LinkBase="skills">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

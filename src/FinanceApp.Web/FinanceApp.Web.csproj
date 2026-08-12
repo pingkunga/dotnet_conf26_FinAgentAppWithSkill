@@ -14,6 +14,21 @@
     <PackageReference Include="MudBlazor" />
   </ItemGroup>
 
+  <!--
+    File-based skills (docs/spec.md §4.3) live at the repo root, not under src/FinanceApp.Web, so they need
+    an explicit Content item to end up next to the app at run time. Both destinations are required, not just
+    CopyToPublishDirectory: CopyToOutputDirectory is what makes `skills/` resolvable under
+    AppContext.BaseDirectory during `dotnet run`/`dotnet watch` (bin/Debug/net10.0/...) — found missing via a
+    live spike where load_skill silently came back "not found" with no exception, indistinguishable from the
+    LLM just ignoring the skill. CopyToPublishDirectory covers `dotnet publish`/Docker the same way.
+  -->
+  <ItemGroup>
+    <Content Include="..\..\skills\**" LinkBase="skills">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

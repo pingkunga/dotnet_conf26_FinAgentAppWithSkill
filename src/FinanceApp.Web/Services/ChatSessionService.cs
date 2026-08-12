@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using FinanceApp.AI;
 using FinanceApp.Core.Abstractions;
+using FinanceApp.Skills;
 using FinanceApp.Skills.Budgeting;
 using Microsoft.Agents.AI;
 
@@ -12,10 +14,10 @@ namespace FinanceApp.Web.Services;
 /// <see cref="IServiceScopeFactory"/>. <c>Chat.razor</c> is the only consumer.
 /// </summary>
 /// <remarks>
-/// Only <see cref="FinanceApp.Skills.Budgeting.BudgetSkill"/> is wired so far — the other three skill
-/// sources (inline receipt-OCR, file-based savings-goals, MCP monthly-summary) don't exist yet (docs/spec.md
-/// §4.2/§4.3/§4.4); adding a <c>.UseFileSkill(...)</c> call against a `skills/` directory that doesn't exist
-/// would throw or silently produce nothing, so those are left as comments, not speculative calls.
+/// <see cref="FinanceApp.Skills.Budgeting.BudgetSkill"/> (class-based) and two file-based skills
+/// (<c>skills/savings-goals</c>, no scripts; <c>skills/savings-calculator</c>, backed by
+/// <see cref="SubprocessScriptRunner"/>) are wired. Inline receipt-OCR and the MCP monthly-summary skill
+/// don't exist yet (docs/spec.md §4.2/§4.4) — left as comments, not speculative calls.
 /// </remarks>
 public sealed class ChatSessionService(
     IAgentFactory agentFactory,
@@ -60,12 +62,20 @@ public sealed class ChatSessionService(
             ?? throw new InvalidOperationException("ChatSessionService requires an authenticated user.");
 
         var budgetSkill = new BudgetSkill(scopeFactory, userId);
+        var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills");
 
         var skillsProvider = new AgentSkillsProviderBuilder()
             .UseSkill(budgetSkill)
             // TODO(spec §4.2): .UseSkill(receiptOcrInlineSkill) — built per-upload from ReceiptUpload.razor,
             // not appropriate to wire into a general-purpose session agent built here.
-            // TODO(spec §4.3): .UseFileSkill("skills/savings-goals") once that SKILL.md exists.
+            // savings-goals (docs/spec.md §4.3): guidance-only, no scripts/ folder — the runner exists only
+            // because .UseFileSkill(...) requires a non-null one even when there's nothing to ever invoke
+            // (found via a spike: it throws InvalidOperationException at .Build() otherwise).
+            .UseFileSkill(Path.Combine(skillsRoot, "savings-goals"), options: null, scriptRunner: NoScriptsRunner)
+            // savings-calculator (docs/spec.md §4.3): the deliberately script-capable counterpart —
+            // SubprocessScriptRunner is trusted here because this whole path is developer-authored content
+            // shipped with the app (never a user upload; see SubprocessScriptRunner.cs's remarks).
+            .UseFileSkill(Path.Combine(skillsRoot, "savings-calculator"), options: null, scriptRunner: SubprocessScriptRunner.RunAsync)
             // TODO(spec §4.4): .UseMcpSkills(mcpClient) once FinanceApp.McpServer + McpServerLauncher exist,
             // omitted if the launcher's Client is null (graceful degradation).
             .UseOptions(o =>
@@ -85,4 +95,17 @@ public sealed class ChatSessionService(
         _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions);
         return _agent;
     }
+
+    /// <summary>
+    /// Script runner for <c>skills/savings-goals</c>, which deliberately has no <c>scripts/</c> folder.
+    /// <c>AgentSkillsProviderBuilder.UseFileSkill(...)</c> requires a non-null runner regardless of whether
+    /// the skill has any scripts to run — confirmed via a spike, contradicting an official devblog that
+    /// claimed omitting it is fine in that case — so this exists purely to satisfy that requirement and
+    /// should never actually be invoked.
+    /// </summary>
+    private static Task<object?> NoScriptsRunner(
+        AgentFileSkill skill, AgentFileSkillScript script, JsonElement? arguments,
+        IServiceProvider? serviceProvider, CancellationToken cancellationToken) =>
+        throw new NotSupportedException(
+            $"'{skill.Frontmatter.Name}' has no scripts/ folder; '{script.Name}' should never be invoked.");
 }
