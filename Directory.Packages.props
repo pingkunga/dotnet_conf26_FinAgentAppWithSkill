@@ -31,6 +31,37 @@
     <!-- FinanceApp.AI.Tests — proving/disproving §3.2's env-var-binding claim (see ChatClientFactoryTests) -->
     <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.10" />
+    <!--
+      MCP-based skill (docs/spec.md §4.4). Microsoft.Agents.AI.Mcp is alpha-only and its own nuspec pins
+      ModelContextProtocol/ModelContextProtocol.Core to 1.2.0, not the latest 2.1.0 — confirmed via a
+      spike (mixing 2.1.0 in crashes with a TypeLoadException, a type 1.2.0-era code references was
+      removed in 2.x). This pin is now specifically for FinanceApp.Web's MCP *client* side only.
+    -->
+    <PackageVersion Include="Microsoft.Agents.AI.Mcp" Version="1.17.0-alpha.260804.1" />
+    <PackageVersion Include="ModelContextProtocol" Version="1.2.0" />
+    <!--
+      HTTP MCP transport, Step 1 (docs/spec.md §5). FinanceApp.McpServer hosts over HTTP now, which needs
+      ModelContextProtocol.AspNetCore — a separate package from the base ModelContextProtocol above, not
+      available at 1.2.0. Deliberately pinned newer (latest as of 2026-08-14) than the 1.2.0 client pin —
+      confirmed via a spike that a 1.2.0 HttpClientTransport client talks the wire protocol fine against a
+      server hosted on this newer generation; the two don't need to match.
+    -->
+    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <!--
+      FinanceApp.McpServer.Tests' real concurrent multi-user isolation test (docs/spec.md §5) — an
+      in-process WebApplicationFactory<Program> host so an EF Core InMemory database can be shared with the
+      test (a real subprocess can't share InMemory data across process boundaries, and no real Postgres is
+      available in this environment).
+    -->
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
+    <!--
+      FinanceApp.Web mints the per-session bearer token McpServer validates (docs/spec.md §5). Version
+      bumped to match what Microsoft.AspNetCore.Authentication.JwtBearer 10.0.10 pulls in transitively
+      (Microsoft.IdentityModel.Protocols.OpenIdConnect -> System.IdentityModel.Tokens.Jwt >= 8.19.2) —
+      an explicit lower pin here caused an NU1605 package-downgrade error in FinanceApp.McpServer.Tests.
+    -->
+    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.19.2" />
   </ItemGroup>
 
 </Project>

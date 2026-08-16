@@ -8,6 +8,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FinanceApp.AI.Tests/FinanceApp.AI.Tests.csproj" />
+    <Project Path="tests/FinanceApp.McpServer.Tests/FinanceApp.McpServer.Tests.csproj" />
     <Project Path="tests/FinanceApp.Skills.Tests/FinanceApp.Skills.Tests.csproj" />
   </Folder>
 </Solution>
