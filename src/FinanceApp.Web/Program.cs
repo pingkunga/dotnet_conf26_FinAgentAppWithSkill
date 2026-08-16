@@ -23,15 +23,9 @@ builder.Services.AddMudServices();
 builder.Services.AddScoped<ICurrentUserAccessor, AuthStateCurrentUserAccessor>();
 
 var connectionString = builder.Configuration.GetConnectionString("Finance");
+
 // AddDbContext (scoped) — required by AddEntityFrameworkStores<FinanceDbContext>() below.
-//
-// docs/spec.md §2a point 5 also calls for AddDbContextFactory<FinanceDbContext> for skill scripts'
-// per-invocation scopes (§3.4). Deliberately NOT registered yet: calling both AddDbContext and
-// AddDbContextFactory for the same context type conflicts once the context has an extra
-// scoped-lifetime constructor dependency (ICurrentUserAccessor here) — `dotnet ef migrations` failed
-// DI validation with "Cannot consume scoped service 'DbContextOptions<FinanceDbContext>' from
-// singleton 'IDbContextFactory<FinanceDbContext>'" when both were registered together. When skills are
-// implemented, follow the documented Blazor+EF Core pattern instead (learn.microsoft.com/aspnet/core/blazor/blazor-ef-core):
+// Blazor+EF Core pattern instead (learn.microsoft.com/aspnet/core/blazor/blazor-ef-core):
 // register only AddDbContextFactory<FinanceDbContext>, inject IDbContextFactory<FinanceDbContext>
 // directly into skill code, and call CreateDbContext()/CreateDbContextAsync() per script invocation —
 // do not also add a derived scoped FinanceDbContext registration alongside AddDbContext.
@@ -91,6 +85,11 @@ builder.Services.AddSingleton(sp =>
 });
 builder.Services.AddSingleton<IChatClient>(sp => ChatClientFactory.CreateChatClient(sp.GetRequiredService<AiOptions>()));
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
+
+// MCP-based skill (docs/spec.md §4.4/§5, Step 1 HTTP-migration) — both singleton: McpServerLauncher holds
+// no session state (a stateless per-call factory method), McpAccessTokenIssuer is stateless config+signing.
+builder.Services.AddSingleton<McpAccessTokenIssuer>();
+builder.Services.AddSingleton<McpServerLauncher>();
 
 // ChatSessionService is scoped, not singleton — one AIAgent/AgentSession per Blazor circuit, because the
 // skills it wires (BudgetSkill) close over DB-backed services (docs/spec.md §3.4).

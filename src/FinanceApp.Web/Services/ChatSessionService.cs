@@ -7,6 +7,7 @@ using FinanceApp.Skills.Budgeting;
 using FinanceApp.Skills.ReceiptOcr;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using ModelContextProtocol.Client;
 
 namespace FinanceApp.Web.Services;
 
@@ -18,15 +19,17 @@ namespace FinanceApp.Web.Services;
 /// <remarks>
 /// <see cref="FinanceApp.Skills.Budgeting.BudgetSkill"/> (class-based), two file-based skills
 /// (<c>skills/savings-goals</c>, no scripts; <c>skills/savings-calculator</c>, backed by
-/// <see cref="SubprocessScriptRunner"/>), and receipt-OCR (inline, docs/spec.md §4.2) are wired. The MCP
-/// monthly-summary skill doesn't exist yet (docs/spec.md §4.4) — left as a comment, not a speculative call.
+/// <see cref="SubprocessScriptRunner"/>), receipt-OCR (inline, docs/spec.md §4.2), and the MCP-based
+/// monthly-summary skill (docs/spec.md §4.4, via <see cref="McpServerLauncher"/>) are all wired — all 4
+/// skill source types the app demonstrates.
 /// </remarks>
 public sealed class ChatSessionService(
     IAgentFactory agentFactory,
     ICurrentUserAccessor currentUserAccessor,
     IServiceScopeFactory scopeFactory,
     IChatClient chatClient,
-    AiOptions aiOptions)
+    AiOptions aiOptions,
+    McpServerLauncher mcpServerLauncher) : IAsyncDisposable
 {
     private const string SystemInstructions =
         "You are a helpful personal finance assistant for this app. Use the available skills to look up " +
@@ -35,6 +38,9 @@ public sealed class ChatSessionService(
 
     private AIAgent? _agent;
     private AgentSession? _session;
+
+    // per session, not from which process this is.
+    private McpClient? _mcpClient;
 
     // Backing list for receipt-OCR inline skills, registered dynamically as the user uploads receipts
     // (docs/spec.md §4.2) — read by DynamicInlineSkillsSource below on every turn (paired with
@@ -66,7 +72,7 @@ public sealed class ChatSessionService(
     private async IAsyncEnumerable<AgentResponseUpdate> SendAsyncCore(
         string message, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var agent = GetOrCreateAgent();
+        var agent = await GetOrCreateAgentAsync(cancellationToken);
         _session ??= await agent.CreateSessionAsync(cancellationToken);
 
         await foreach (var update in agent.RunStreamingAsync(message, _session, cancellationToken: cancellationToken))
@@ -75,7 +81,7 @@ public sealed class ChatSessionService(
         }
     }
 
-    private AIAgent GetOrCreateAgent()
+    private async Task<AIAgent> GetOrCreateAgentAsync(CancellationToken cancellationToken)
     {
         if (_agent is not null)
         {
@@ -92,7 +98,12 @@ public sealed class ChatSessionService(
         var budgetSkill = new BudgetSkill(scopeFactory, userId);
         var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills");
 
-        var skillsProvider = new AgentSkillsProviderBuilder()
+        // Attempted once per session, guarded by the _agent is not null check above. Graceful degradation
+        // on any failure — _mcpClient stays null, .UseMcpSkills(...) below is skipped entirely, chat still
+        // works with the other 3 skill sources (docs/spec.md §4.4).
+        _mcpClient = await mcpServerLauncher.TryStartAsync(userId, cancellationToken);
+
+        var skillsBuilder = new AgentSkillsProviderBuilder()
             .UseSkill(budgetSkill)
             // TODO(spec §4.2): .UseSkill(receiptOcrInlineSkill) — built per-upload from ReceiptUpload.razor,
             // not appropriate to wire into a general-purpose session agent built here.
@@ -110,9 +121,15 @@ public sealed class ChatSessionService(
             // skills above lose their discovery cache too, since caching is a builder-wide setting — a
             // few extra small file reads per turn, trivial at this app's scale.
             .UseSource(_ => new DynamicInlineSkillsSource(_dynamicSkills))
-            .DisableCaching()
-            // TODO(spec §4.4): .UseMcpSkills(mcpClient) once FinanceApp.McpServer + McpServerLauncher exist,
-            // omitted if the launcher's Client is null (graceful degradation).
+            .DisableCaching();
+
+        if (_mcpClient is not null)
+        {
+            // Get Skill from MCP server such as monthly-summary 
+            skillsBuilder = skillsBuilder.UseMcpSkills(_mcpClient, new AgentMcpSkillsSourceOptions());
+        }
+
+        var skillsProvider = skillsBuilder
             .UseOptions(o =>
             {
                 // This app has no tool-approval UI (never designed one) — auto-approve. Every script is
@@ -129,6 +146,21 @@ public sealed class ChatSessionService(
 
         _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions);
         return _agent;
+    }
+
+    /// <summary>
+    /// Closes this session's HTTP connection to <c>FinanceApp.McpServer</c> (if one was opened) when the
+    /// owning Blazor circuit's DI scope is torn down — <see cref="ChatSessionService"/> is registered
+    /// scoped, so the container calls this automatically; no explicit hook-up needed elsewhere. No process
+    /// to reap anymore (docs/spec.md §5, Step 1) — the server is a standing service, unaffected by any one
+    /// session ending.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_mcpClient is not null)
+        {
+            await _mcpClient.DisposeAsync();
+        }
     }
 
     /// <summary>

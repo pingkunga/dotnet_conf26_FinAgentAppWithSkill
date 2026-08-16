@@ -13,15 +13,15 @@
     </PackageReference>
     <PackageReference Include="MudBlazor" />
     <PackageReference Include="Markdig" />
+    <!-- MCP-based skill client wiring ChatSessionService's .UseMcpSkills(...) call
+         and McpServerLauncher's McpClient/HttpClientTransport usage both need this. -->
+    <PackageReference Include="Microsoft.Agents.AI.Mcp" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
   </ItemGroup>
 
   <!--
-    File-based skills (docs/spec.md §4.3) live at the repo root, not under src/FinanceApp.Web, so they need
-    an explicit Content item to end up next to the app at run time. Both destinations are required, not just
-    CopyToPublishDirectory: CopyToOutputDirectory is what makes `skills/` resolvable under
-    AppContext.BaseDirectory during `dotnet run`/`dotnet watch` (bin/Debug/net10.0/...) — found missing via a
-    live spike where load_skill silently came back "not found" with no exception, indistinguishable from the
-    LLM just ignoring the skill. CopyToPublishDirectory covers `dotnet publish`/Docker the same way.
+    File-based skills are copied to the output directory so that McpServerProcessTests can read them from AppContext.BaseDirectory/skills/...
   -->
   <ItemGroup>
     <Content Include="..\..\skills\**" LinkBase="skills">
