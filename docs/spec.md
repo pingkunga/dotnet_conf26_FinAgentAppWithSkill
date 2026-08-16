@@ -24,7 +24,8 @@ Multi-LLM-provider support is modeled directly on the reference project
   1. Transactions & budgeting → **Class-based skill** (`AgentClassSkill<T>`)
   2. Receipt OCR → **Code-defined inline skill** (`AgentInlineSkill`, built per-request to close over DI-scoped services)
   3. Savings/investment goals → **File-based skill** (`SKILL.md`, editable without recompiling)
-  4. Monthly summary & advice → **MCP-based skill** (local MCP server in the same solution, stdio transport)
+  4. Monthly summary & advice → **MCP-based skill** (standing HTTP MCP server in the same solution, JWT
+     bearer auth — migrated from an earlier stdio-subprocess-per-session design, see §4.4/§5)
 
 Package versions below were confirmed live against nuget.org on 2026-08-07
 (`Microsoft.Agents.AI` 1.17.0 stable — this is where `AgentSkillsProvider`/`AgentSkillsProviderBuilder`
@@ -55,13 +56,14 @@ MyFinanceWithAgentSkill/
 │   ├── FinanceApp.Core/               # domain entities + EF Core DbContext + repositories (shared by Web & McpServer)
 │   ├── FinanceApp.AI/                 # ChatClientFactory + AgentFactory (isolated LLM-provider risk boundary)
 │   ├── FinanceApp.Skills/             # BudgetSkill (class-based) + ReceiptOcrSkillFactory (inline) — testable, no ASP.NET dep
-│   ├── FinanceApp.McpServer/          # stdio MCP server hosting the monthly-summary skill
+│   ├── FinanceApp.McpServer/          # standing HTTP MCP server (JWT bearer auth) hosting the monthly-summary skill
 │   └── FinanceApp.Web/                # Blazor Server host: Program.cs, Components/Pages/*, Services/*
 ├── docs/
 │   └── spec.md                        # this file
 ├── tests/
-│   ├── FinanceApp.Skills.Tests/       # xUnit — BudgetSkill scripts + SubprocessScriptRunner, no LLM/python3
-│   └── FinanceApp.AI.Tests/           # xUnit — ChatClientFactory, SkillActivityExtractor, file-skill round trips
+│   ├── FinanceApp.Skills.Tests/       # xUnit — BudgetSkill/ReceiptOcr scripts, SubprocessScriptRunner, MonthlySummaryRepository, no LLM/python3
+│   ├── FinanceApp.AI.Tests/           # xUnit — ChatClientFactory, SkillActivityExtractor, file-skill round trips
+│   └── FinanceApp.McpServer.Tests/    # xUnit — resource-handler logic (InMemory), a real WebApplicationFactory-based concurrent multi-user isolation test, + real HTTP subprocess round trip, no LLM/Postgres
 ```
 
 **Project references**: `Web → Core, AI, Skills` · `McpServer → Core` · `Skills → Core, AI` · nothing
@@ -291,7 +293,10 @@ failures from a specific provider (bad API key, network down, etc.) are an ordin
 for `ChatSessionService`/`Chat.razor`, not something `AgentFactory` needs to special-case.
 
 ### 3.4 Scoped vs. singleton
-- **Singleton**: `IChatClient`, `AgentFileSkillsSource` (just reads files), the MCP `McpClient` connection.
+- **Singleton**: `IChatClient`, `AgentFileSkillsSource` (just reads files), `McpServerLauncher` and
+  `McpAccessTokenIssuer` (both stateless per-session factory methods, §4.4/§5 — **not** the MCP `McpClient`
+  connection itself, which is per-session, held on `ChatSessionService`; nor `FinanceApp.McpServer` itself,
+  which is now a standing HTTP service shared across every session — see §5's HTTP-migration note).
 - **`AIAgent` built per conversation**, not as a singleton — via a **scoped** `ChatSessionService`
   (`Web/Services/ChatSessionService.cs`), because `BudgetSkill` and the inline OCR skill close over
   DB-backed services.
@@ -313,7 +318,9 @@ built into it, and returns `UserId = null`. That would make `FinanceDbContext`'s
 (`x.UserId == _currentUserId`) silently return **zero rows for every query**, regardless of the `userId`
 the skill was constructed with — the opposite failure mode from a leak, but still wrong, and still a
 concrete instance of "the scoping must be enforced structurally" (§2a point 7). Fix, now the standard
-pattern for any skill (and `FinanceApp.McpServer`, §5, which has the identical problem): resolve only
+pattern for any non-HTTP skill script — `FinanceApp.McpServer` no longer needs it (§5): now a real
+ASP.NET Core app, it resolves `FinanceDbContext` through the normal per-HTTP-request DI scope with a
+claims-based `ICurrentUserAccessor`, not a captured `IServiceScopeFactory` scope. Resolve only
 `DbContextOptions<FinanceDbContext>` from the scope (registered scoped by plain `AddDbContext`, §2a point
 5 — resolvable standalone without needing `ICurrentUserAccessor`), then construct
 `new FinanceDbContext(options, new FixedCurrentUserAccessor(userId))` manually, where
@@ -487,23 +494,163 @@ found" under plain `dotnet run`/`dotnet watch`, indistinguishable from the LLM s
 Whenever the Dockerfile is written (§6), it must install `python3` for `savings-calculator` to work in the
 container — a real, accepted cost this design no longer avoids.
 
-### 4.4 Monthly Summary & Advice → MCP-based skill
-Registered via `AgentSkillsProviderBuilder().UseMcpSkills(mcpClient)`, where `mcpClient` comes from the
-singleton `McpServerLauncher` (§5). **If the MCP server failed to start, `.UseMcpSkills(...)` is skipped
-entirely for that agent build** — the other three skills keep working; this is the "optional at startup,
-fail gracefully" behavior required for this piece.
+### 4.4 Monthly Summary & Advice → MCP-based skill (implemented 2026-08-13, HTTP transport 2026-08-14)
 
-All four sources combine in one place:
-```csharp
-new AgentSkillsProviderBuilder()
-    .UseFileSkill(skillsPath)
-    .UseSkill(budgetSkill)
-    .UseSkill(receiptOcrInlineSkill)   // built per-request, see §4.2/§3.4
-    .UseMcpSkills(mcpClient)           // only if mcpClient is non-null
-    .Build();
+**This section originally assumed `.UseMcpSkills(mcpClient)` turns an MCP server's tools into agent
+function calls. That assumption was wrong** — confirmed via a live spike (a real stdio MCP server + a real
+`McpClient` + a scripted fake `IChatClient`, no LLM involved, deleted after). `Microsoft.Agents.AI.Mcp`'s
+`.UseMcpSkills(...)` is a **skill-distribution channel**, not a tool bridge:
+
+1. At `load_skill` discovery time, the framework fetches a well-known `skill://index.json` resource from
+   the MCP server — a JSON list of `{ name, type, description, url, digest }` entries.
+2. For `type: "skill-md"` entries, `load_skill("<name>")` fetches the entry's `url` **live** via
+   `ReadResourceAsync` and parses it as a normal `SKILL.md` (same frontmatter shape as the file-based
+   skills, §4.3).
+3. `read_skill_resource("<name>", "<resourceName>")` resolves to `<skill-root>/<resourceName>` and reads
+   it **live, per call** — not a prefetched/cached blob. This is what makes the skill actually useful:
+   `FinanceApp.McpServer` computes real numbers from Postgres on every `read_skill_resource` call.
+
+Spike proof (server-side request log, one call each):
 ```
+ReadResource: skill://index.json                    ← load_skill discovery
+ReadResource: skill://monthly-summary/SKILL.md       ← load_skill("monthly-summary")
+ReadResource: skill://monthly-summary/summary-2026-08 ← read_skill_resource("monthly-summary","summary-2026-08")
+```
+And the tool-call names hitting the (fake) `IChatClient` were exactly `load_skill`/`read_skill_resource` —
+the **same names `SkillActivityExtractor` already matches** (§3.4/§7/§8), so the activity-log/skill-fired
+verification story needed **no changes** for this 4th source. This also makes MCP a genuinely distinct
+`AgentSkillsSource` (`AgentMcpSkillsSource`, alongside `UseSkill`/`UseFileSkill`/`UseSource`) — the
+alternative considered and rejected (wrap `McpClient.CallToolAsync` inside a *class-based* skill) would
+have silently reused a slot already spent on `BudgetSkill`, failing the "4 different skill source types"
+firm requirement even though it would have looked identical in the activity log.
 
-**Future idea, not decided/scheduled (2026-08-12)**: this skill is the one place in the app where
+**Resource design** (`FinanceApp.Skills/../MonthlySummaryResourceHandlers.cs` in `FinanceApp.McpServer`):
+- `skill://index.json` — one entry: `monthly-summary`, `type: "skill-md"`.
+- `skill://monthly-summary/SKILL.md` — static guidance (checked into `src/FinanceApp.McpServer/skills/
+  monthly-summary/SKILL.md`, same spirit as the file-based skills' content, just served over MCP instead
+  of discovered from local disk). Tells the agent to call `read_skill_resource` with `resourceName` =
+  `summary-<year>-<month>` (e.g. `summary-2026-08`) — MCP resource reads don't carry free-form structured
+  arguments the way tool calls do, so month/year travel encoded in the resource name itself, the same
+  "spell out the exact convention" approach §4.3 already used for `savings-calculator`'s script-path
+  gotcha.
+- `skill://monthly-summary/summary-<year>-<month>` — computed live via
+  `MonthlySummaryRepository.GetMonthlySummaryAsync` (`FinanceApp.Core/Repositories/
+  MonthlySummaryRepository.cs`): total income/expense for the month, per-category totals, and
+  budget-vs-actual status reusing `BudgetRepository.GetBudgetStatusAsync` (§4.1) so the two never drift
+  apart. Returned as JSON.
+
+**Package versions — deliberately pinned, not "latest"**: `Microsoft.Agents.AI.Mcp` is alpha-only
+(`1.17.0-alpha.260804.1`) and its own nuspec pins `ModelContextProtocol`/`ModelContextProtocol.Core` to
+**1.2.0**, not the latest stable — confirmed by mixing versions and reproducing a `TypeLoadException`
+(`McpTask` didn't exist in 1.2.0-era `ModelContextProtocol.Core`, which the newer generation's
+`Microsoft.Agents.AI.Mcp` build referenced). This pin now applies specifically to `FinanceApp.Web`'s MCP
+**client** side. `FinanceApp.McpServer` (§5) is pinned differently — see there.
+
+**User isolation — HTTP-migration Step 1 rewrite (2026-08-14).** The original stdio design (§4.4/§5 as
+implemented 2026-08-13) spawned one `FinanceApp.McpServer` subprocess **per chat session**, with `userId`
+passed via `StdioClientTransportOptions.EnvironmentVariables["FINANCEAPP_USER_ID"]` and bound to a
+`FixedCurrentUserAccessor` for that process's whole lifetime — isolation came from OS process boundaries.
+**That design is gone.** `FinanceApp.McpServer` is now a standing HTTP service, shared across every user's
+requests — a deliberate architecture decision (Option A: unify on one HTTP transport for both the in-app
+Web client and, later, external OAuth 2.1 clients — see the deferred-concern discussion this plan grew
+from) with a real trade-off: isolation no longer comes for free from "which process this is." It now
+depends on every request resolving its **own** scoped `FinanceDbContext`/`ICurrentUserAccessor` correctly.
+The mechanism (§2a point 7's firm rule still applies — MCP resource/tool requests are LLM-driven, so
+`userId` must never be a value the LLM supplies):
+1. `FinanceApp.Web`'s `McpAccessTokenIssuer` mints a short-lived JWT per chat session (`sub` claim = the
+   session's userId, minted as `ClaimTypes.NameIdentifier` — see the claim-mapping gotcha below), signed
+   with a shared secret (`Mcp:SigningKey`, configured identically on both sides — dev-only placeholder
+   value checked into both `appsettings.json`s, same posture as the AI provider API keys elsewhere in this
+   project; production needs a real secret via user-secrets/env var).
+2. `McpServerLauncher` attaches that token as an `Authorization: Bearer` header on every request to the
+   now-HTTP `FinanceApp.McpServer` (`Mcp:BaseUrl` config).
+3. `FinanceApp.McpServer`'s `AddAuthentication().AddJwtBearer(...)` validates the token per request;
+   `app.MapMcp().RequireAuthorization()` rejects anything unauthenticated before it reaches a handler.
+4. A new per-request `ICurrentUserAccessor` (`HttpUserContextAccessor`) reads the validated
+   `ClaimsPrincipal`'s `ClaimTypes.NameIdentifier` claim, resolved fresh via `IHttpContextAccessor` on
+   every call — replacing the old `FixedCurrentUserAccessor`-bound-at-startup pattern for this project.
+5. `MonthlySummaryResourceHandlers` is registered **scoped** in DI (not constructed once with captured
+   `dbOptions`/`userId`) — a fresh instance, with a fresh `FinanceDbContext`, resolves per HTTP request via
+   `RequestContext<T>.Services` (confirmed via a spike that this exposes the request's own DI scope).
+
+**One gotcha, found via a spike and worth calling out explicitly**: `JwtSecurityTokenHandler`'s default
+inbound claim-type mapping remaps a minted `"sub"` claim to the long `ClaimTypes.NameIdentifier` XML-
+namespace URI before any handler ever sees it — a plain `"sub"` lookup on the server side silently returns
+nothing. Both `McpAccessTokenIssuer` (mint side) and `HttpUserContextAccessor` (read side) use
+`ClaimTypes.NameIdentifier` explicitly, which also matches the exact claim type
+`AuthStateCurrentUserAccessor` already uses elsewhere in this app (§2a point 3) — one consistent
+convention for "where does userId live in a `ClaimsPrincipal`" across the whole codebase.
+
+**Forward-compatible with Step 2 (not this pass) by design**: a future OAuth 2.1 layer (OpenIddict, for
+external clients like ChatGPT/Claude Desktop connecting directly) only needs to change what issues and
+signs the token — swapping `TokenValidationParameters.IssuerSigningKey` for an `Authority`-based
+validation against OpenIddict. The `AddJwtBearer(...)` middleware itself, and everything downstream of it
+(`HttpUserContextAccessor`, the scoped-DI resource handlers), doesn't need to change.
+
+**Graceful degradation** (unchanged from the original design intent, just a different failure mode):
+`McpServerLauncher.TryStartAsync` catches any connect/token-rejection failure and returns `null`;
+`ChatSessionService` skips `.UseMcpSkills(...)` entirely for that session when the client is null. All four
+sources combine in one place (`ChatSessionService.GetOrCreateAgentAsync`):
+```csharp
+var skillsBuilder = new AgentSkillsProviderBuilder()
+    .UseSkill(budgetSkill)
+    .UseFileSkill(savingsGoalsPath, scriptRunner: NoScriptsRunner)
+    .UseFileSkill(savingsCalculatorPath, scriptRunner: SubprocessScriptRunner.RunAsync)
+    .UseSource(_ => new DynamicInlineSkillsSource(_dynamicSkills))  // receipt-OCR, §4.2
+    .DisableCaching();
+
+if (_mcpClient is not null)
+{
+    skillsBuilder = skillsBuilder.UseMcpSkills(_mcpClient, new AgentMcpSkillsSourceOptions());
+}
+```
+Building the agent is now async (`GetOrCreateAgentAsync`) because spawning/connecting the MCP subprocess
+is async — the previous synchronous `GetOrCreateAgent()` couldn't await `McpServerLauncher.TryStartAsync`.
+`ChatSessionService` also now implements `IAsyncDisposable`, disposing `_mcpClient` (which ends the
+subprocess) when the owning Blazor circuit's scoped DI container is torn down.
+
+**Dev-time launch, now standing HTTP service, not a per-session subprocess**: `FinanceApp.McpServer` must
+be running on its own (`dotnet run --project src/FinanceApp.McpServer`, or the published binary) before
+`FinanceApp.Web` starts — `McpServerLauncher` connects to it at `Mcp:BaseUrl`, it no longer spawns it.
+This is a real dev-loop change from the stdio design (CLAUDE.md's documented commands need updating
+accordingly) — not yet folded into Docker/Compose wiring (§6), which stays a separate, already-pending
+piece of work by explicit choice when this HTTP migration was planned.
+
+**Tests** (`tests/FinanceApp.McpServer.Tests`), three files:
+- `MonthlySummaryResourceHandlersTests` calls the resource handlers' logic directly (via `*CoreAsync`
+  methods that take plain arguments — `ModelContextProtocol.Server.RequestContext<T>`'s only constructor
+  needs a real `McpServer` + `JsonRpcRequest`, too heavy for a unit test) against EF Core InMemory, no MCP
+  transport. Its own "concurrent" test constructs two handler instances by hand, each with its own
+  `FixedCurrentUserAccessor` — this proves the **repository query** correctly separates two users' rows,
+  but that construction is structurally incapable of leaking regardless of whether real per-request DI
+  scoping works, so it does **not** exercise the new risk the HTTP migration introduced. Caught during
+  review — the first version of this doc claimed it did; corrected here.
+- `McpServerConcurrentIsolationTests` is the one that actually does: a real `WebApplicationFactory<Program>`
+  in-process host, two concurrent HTTP requests carrying two different users' bearer tokens, run through
+  the **real** `HttpUserContextAccessor` + JwtBearer + scoped-DI pipeline (`Task.WhenAll`), asserting
+  neither ever sees the other's numbers. Needs `Program.cs`'s `Testing:InMemoryDatabaseName` config seam
+  (an EF Core InMemory branch, gated behind that key, never set outside tests — added specifically because
+  a real subprocess can't share an InMemory database with the test process, and no real Postgres is
+  available here) and pulls in `Microsoft.EntityFrameworkCore.InMemory` as a direct (not just test-project)
+  dependency of `FinanceApp.McpServer` as a result.
+- `McpServerProcessTests` spawns the **real** built `FinanceApp.McpServer.dll` (picking a free TCP port
+  itself, passed via `--urls` — command-line config beats `appsettings.json` unconditionally, which an
+  `ASPNETCORE_URLS` env var empirically did not in this environment) and talks to it over a real HTTP
+  `McpClient` — two genuine .NET processes, needing neither Docker nor an LLM, same bar as
+  `FileSkillTests`/`SubprocessScriptRunnerTests` — confirming `skill://index.json` and `SKILL.md` delivery
+  actually round-trip over HTTP, plus the JwtBearer auth path itself: valid token succeeds; missing,
+  wrong-signature, and expired tokens are all rejected **with a 401** specifically (asserted on
+  `HttpRequestException.StatusCode`, not just "some exception was thrown" — a connection-refused or an
+  unrelated bug would also satisfy a bare not-null check without proving the auth boundary itself works).
+
+The DB-touching summary resource itself is still covered directly (`MonthlySummaryRepositoryTests` in
+`tests/FinanceApp.Skills.Tests`, and `MonthlySummaryResourceHandlersTests`'s InMemory-backed cases), not
+through the subprocess test, since no
+real Postgres is available in this environment (same shape of ceiling as §4.3's python3 gap and §4.2's
+vision-model gap).
+
+**Future idea, not decided/scheduled (2026-08-12), and deliberately not bundled into this pass**: this
+skill is the one place in the app where
 `Microsoft.Agents.AI.Harness`'s `HarnessAgent` (evaluated and *not* adopted for the file-skill trust-boundary
 question, see §4.3) might actually earn its keep. "Analyze this month's spending vs. last month, flag
 anomalies, suggest budget changes" is genuinely multi-step (gather via MCP → analyze → compare →
@@ -520,43 +667,76 @@ skill itself gets built.
 
 ---
 
-## 5. The MCP Server Project (`FinanceApp.McpServer`)
+## 5. The MCP Server Project (`FinanceApp.McpServer`) — implemented 2026-08-13, HTTP transport 2026-08-14
 
-Console app (`OutputType=Exe`), references `FinanceApp.Core` (reads transactions/budgets/goals) plus
-`ModelContextProtocol`/`ModelContextProtocol.Core` and `Microsoft.Agents.AI.Mcp` (alpha — for
-`skill://index.json`/`skill-md` server-side helpers; verify these exist in that package vs. hand-rolled
-JSON at implementation time). Launched with `--server` arg for stdio-MCP mode.
+**HTTP-migration Step 1 (2026-08-14): `FinanceApp.McpServer` is now a standing ASP.NET Core service**
+(`Microsoft.NET.Sdk.Web`, `WebApplication.CreateBuilder`), not a console app spawned fresh per chat
+session. This is Step 1 of a deliberately 2-step plan (see the deferred-concern discussion this grew from):
+Step 1 unifies on HTTP for both the in-app `FinanceApp.Web` client and (Step 2, not this pass) future
+external OAuth 2.1 clients like ChatGPT/Claude Desktop, with lightweight JWT-bearer auth for now. The
+original stdio design (below, superseded) is kept here in spirit only where the underlying resource logic
+is unchanged.
 
-**Critical constraint, called out explicitly because it's the single most likely silent-failure bug in
-this subsystem: stdout is the JSON-RPC transport channel for stdio MCP.** No `Console.WriteLine`, no
-default console logger — all diagnostics go to a file sink (`Serilog.Sinks.File`) or `Console.Error` only.
+References `FinanceApp.Core` (reads transactions/budgets via `MonthlySummaryRepository`/`BudgetRepository`,
+§4.4), `ModelContextProtocol.AspNetCore`, and `Microsoft.AspNetCore.Authentication.JwtBearer`. Deliberately
+does **not** reference the base `ModelContextProtocol` package directly — that package version is pinned to
+**1.2.0** centrally (still required by `FinanceApp.Web`'s client side via `Microsoft.Agents.AI.Mcp`'s alpha
+nuspec), and an explicit 1.2.0 reference here conflicts with `ModelContextProtocol.AspNetCore`'s own
+dependency on a newer `ModelContextProtocol` generation (confirmed directly: NU1605 package-downgrade
+error). Instead `ModelContextProtocol`/`.Core` resolve transitively through `ModelContextProtocol.
+AspNetCore` at whatever version *it* needs — confirmed via a spike that a 1.2.0-generation
+`HttpClientTransport` client still talks the wire protocol fine against a server hosted on this newer
+generation; the two sides just can't be mixed **in the same process**, which this project structure avoids
+by construction (client and server are always separate processes now). No dependency on
+`Microsoft.Agents.AI.Mcp` — that package is a *client*-side skill-discovery helper (§4.4), the server side
+just implements plain MCP resource handlers by hand (`skill://index.json` is hand-written JSON, not a
+library-generated shape).
 
-The server's own logic (`MonthlySummaryTool`) stays simple by design: query `FinanceDbContext` for the
-month's transactions/budgets/goals, compute totals/adherence/progress, and **return structured data** — the
-narrative summary + recommendations are generated by the *calling* agent's LLM, not by the MCP server.
+**The old stdout constraint is gone.** stdio is no longer the transport (HTTP is), so the "never
+`Console.WriteLine`" discipline the original stdio design required (`builder.Logging.ClearProviders()`,
+`Console.Error`-only logging) no longer applies — normal ASP.NET Core console logging works fine now. This
+was previously called out as "the single most likely silent-failure bug in this subsystem"; it's simply
+not a risk category that exists anymore under HTTP.
 
-**No ambient auth — `userId` must be an explicit tool argument.** `FinanceApp.McpServer` is a singleton
-subprocess launched once at `Web` startup and shared across every authenticated user's conversations — it
-has no HTTP request, no cookie, no `AuthenticationStateProvider`, nothing to derive "current user" from on
-its own. The monthly-summary tool call therefore takes `userId` as an explicit argument supplied by the
-calling agent (which got it from `ChatSessionService`/`ICurrentUserAccessor`, §2a/§3.4), and the trust
-boundary is: same host, stdio transport, the `Web` process is the trusted caller — the server does not
-re-authenticate the id it's given. This is the MCP-specific instance of the §2a point 7 firm rule: getting
-this argument wrong is the one place in the whole design where a bug would leak one user's monthly summary
-to another.
+The server's own logic (`MonthlySummaryResourceHandlers`) stays simple by design: `ReadResourceCoreAsync`
+for a `summary-<year>-<month>` resource calls `MonthlySummaryRepository.GetMonthlySummaryAsync` and
+**returns structured JSON data** — the narrative summary + recommendations are generated by the *calling*
+agent's LLM (per `skill://monthly-summary/SKILL.md`'s guidance), not by the MCP server. This part is
+unchanged by the HTTP migration.
+
+**Auth and user isolation — see §4.4's rewritten isolation section for the full mechanism** (JWT bearer,
+`HttpUserContextAccessor`, per-request scoped `MonthlySummaryResourceHandlers`). Summary: `app.MapMcp()
+.RequireAuthorization()` rejects any unauthenticated request before it reaches a handler;
+`AddAuthentication().AddJwtBearer(...)` validates against a shared signing key (`Mcp:SigningKey`) for now
+(Step 1), with `ValidIssuer = "FinanceApp.Web"` / `ValidAudience = "FinanceApp.McpServer"` also checked.
+There is no longer a "which process is this" trust boundary — the trust boundary is "does this request
+carry a token this server's configured key actually signed," per request, forever, for as long as the
+service runs.
 
 **Migration ownership**: `FinanceApp.Web` owns all migrations (`Database.MigrateAsync()` at startup, gated
 by `AUTO_MIGRATE` env var, default true). `McpServer` only ever issues read queries against the same
-connection string — never migrates — avoiding two processes racing on schema changes.
+connection string — never migrates — avoiding two processes racing on schema changes. Unchanged by the
+HTTP migration; `FinanceDbContext` is now registered via `AddDbContext` (standard ASP.NET Core DI,
+resolved per HTTP request) instead of manually constructed from `DbContextOptions<FinanceDbContext>` once
+at startup.
 
-**Lifecycle** (`src/FinanceApp.Web/Services/McpServerLauncher.cs`, an `IHostedService`):
-- `StartAsync`: launches `dotnet <path-to-McpServer.dll> --server` via `StdioClientTransport`, with the
-  connection string passed explicitly through `EnvironmentVariables` (not relied on via process
-  inheritance), bounded by a 10s startup timeout. On any failure, logs a warning and leaves its `Client`
-  property `null` — `AgentFactory` checks this and omits `.UseMcpSkills(...)` for that null case.
-- `StopAsync`: disposes the `McpClient`/subprocess cleanly.
-- DLL path resolved via config (`Mcp:ServerDllPath`) — dev default relative to `Web`'s `bin/Debug`
-  output, Docker default `/app/mcpserver/FinanceApp.McpServer.dll` (see §6).
+**Lifecycle** (`src/FinanceApp.Web/Services/McpServerLauncher.cs`, a plain singleton service — it holds no
+state of its own between calls, it's a stateless per-session factory method):
+- `TryStartAsync(userId, ct)`: mints a bearer token via `McpAccessTokenIssuer.IssueToken(userId)`, builds
+  an `HttpClientTransport` (`Endpoint = Mcp:BaseUrl`, `AdditionalHeaders["Authorization"] = "Bearer
+  <token>"`). Any exception (connection refused, token rejected) is caught and logged as a warning; returns
+  `null` in that case — same graceful-degradation shape as before, different failure mode.
+- Called once per session, from `ChatSessionService.GetOrCreateAgentAsync` (not at `Web` startup) — the
+  *token*'s lifetime matches the chat session's (10-minute expiry, §4.4), not the server process's, which
+  now outlives every individual session.
+- `ChatSessionService.DisposeAsync()` disposes the `McpClient` (just an HTTP connection now, no subprocess
+  to reap) when the owning Blazor circuit's scope tears down — the server itself is unaffected.
+
+**Superseded stdio design (2026-08-13, kept for historical context only)**: previously spawned as a
+subprocess per chat session via `StdioClientTransport`/`dotnet run --project <dir>`, `userId` passed via
+`StdioClientTransportOptions.EnvironmentVariables["FINANCEAPP_USER_ID"]` and bound to a
+`FixedCurrentUserAccessor` for that one process's whole lifetime — isolation came from OS process
+boundaries, not request-level auth. Replaced outright by the design above, not run alongside it.
 
 ---
 
@@ -660,12 +840,17 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
   `Goals.razor`'s `?goalId=`). When vision isn't supported, manual entry fields (vendor/amount/category)
   are shown instead, submitted as a plain `Transaction` write with `Source = Manual` and
   `Receipt.OcrStatus = Unsupported` — no agent involved, matching `Transactions.razor`'s precedent.
-- **`Chat.razor`** — **implemented 2026-08-11, extended 2026-08-12 for receipt handoff**, the demo
-  centerpiece: freeform chat wired to `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per
-  Blazor circuit — `BudgetSkill`, the `savings-goals`/`savings-calculator` file skills, and dynamically-
-  registered receipt-OCR skills are all wired now, §4.1/§4.3/§4.2; only the MCP monthly-summary skill still
-  doesn't exist, see §4.4), streams the response, and renders an **`AgentActivityLog`** side panel via
-  `FinanceApp.AI.SkillActivityExtractor`. Also accepts `?goalId=<guid>` from `Goals.razor`'s handoff and
+- **`Chat.razor`** — **implemented 2026-08-11, extended 2026-08-12 for receipt handoff, 2026-08-13 for
+  Markdig rendering**, the demo centerpiece: freeform chat wired to `ChatSessionService` (builds one
+  `AIAgent` + one `AgentSession` per Blazor circuit — all 4 skill sources are wired now: `BudgetSkill`
+  (§4.1), the `savings-goals`/`savings-calculator` file skills (§4.3), dynamically-registered receipt-OCR
+  skills (§4.2), and the MCP-based monthly-summary skill when the per-session server starts successfully
+  (§4.4)), streams the response, and renders an **`AgentActivityLog`** side panel via
+  `FinanceApp.AI.SkillActivityExtractor`. Assistant messages render as sanitized Markdown (`Markdig`,
+  `.UseAdvancedExtensions().DisableHtml()` — the latter is load-bearing: a spike found raw HTML in a
+  response passes through unescaped without it, a real XSS path since this renders LLM-generated,
+  potentially prompt-injected text); user input stays plain text. Also accepts `?goalId=<guid>` from
+  `Goals.razor`'s handoff and
   `?receiptId=<guid>` from `ReceiptUpload.razor`'s (above) via `[SupplyParameterFromQuery]`, read in
   `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real
   goal/receipt — deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page
@@ -727,11 +912,15 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
    name, then `run_skill_script`/`read_skill_resource`) rather than eyeballing the prose — narrative output
    alone doesn't prove the skill was actually invoked (the LLM could answer from general knowledge). This
    reuses the exact mechanism built for `AgentActivityLog` in §7.
-3. **Graceful-degradation check** — deliberately break `Mcp:ServerDllPath` and confirm the app still
-   starts, the other three skills still work, and the monthly-summary skill is simply absent from the
-   trace (no crash).
-4. **Local dev loop**: `docker compose up postgres -d`, then `dotnet run --project src/FinanceApp.Web`
-   (auto-migrates, launches `McpServer` from its `bin/Debug` output); `dotnet watch` for UI hot reload.
+3. **Graceful-degradation check** — deliberately break the MCP connection (don't start
+   `FinanceApp.McpServer`, or point `Mcp:BaseUrl` at a bad address/port) and confirm the app still starts,
+   a chat session still starts, the other three skills still work, and the monthly-summary skill is simply
+   absent from the trace (no crash) — `McpServerLauncher.TryStartAsync`'s catch-and-return-null path is
+   exactly this.
+4. **Local dev loop**: `docker compose up postgres -d`, then `dotnet run --project src/FinanceApp.McpServer`
+   (standing HTTP service — must be started explicitly now, no longer auto-spawned by `Web`), then
+   `dotnet run --project src/FinanceApp.Web` (auto-migrates; connects to `McpServer` over HTTP via
+   `Mcp:BaseUrl`); `dotnet watch` for UI hot reload.
 5. **Full stack**: `docker compose up --build`; check `docker compose logs web` for the absence of the "MCP
    skills server unavailable" warning, and `docker compose exec postgres psql ... -c '\dt'` to confirm
    migrations applied.
@@ -752,6 +941,10 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
 4. Savings-goals file skill ships with no `scripts/` folder, specifically to keep Python/pwsh out of the
    Docker image — revisit the Dockerfile if that ever changes.
 5. Migrations owned exclusively by `Web`; `McpServer` is read-only against the same database.
+7. `FinanceApp.McpServer` runs as a standing HTTP service (Step 1 of a 2-step HTTP-migration plan, §4.4/§5)
+   — internal auth only (JWT bearer, shared signing key) for now; OAuth 2.1 for external clients
+   (ChatGPT/Claude Desktop) is Step 2, deliberately not started. Not yet wired into Docker Compose (§6) —
+   folded into the pre-existing Docker gap rather than this pass.
 6. Ollama itself isn't containerized by default in Compose (assumed to run on the host).
 
 ## Future improvements (deliberately out of scope for now)
@@ -781,20 +974,24 @@ feature; that surface area was unused complexity, not a security decision. If ev
    agent-level only (`AnthropicClient.AsAIAgent(...)`, per Microsoft Learn's Anthropic-provider doc page —
    no `IChatClient` exposed), so `ChatClientFactory` uses the documented fallback, `Anthropic.SDK` 5.10.0
    (tghamm, community): `new AnthropicClient(key).Messages` implements `IChatClient` directly. See §3.1.
-3. **`Microsoft.Agents.AI.Mcp`** (alpha) — exact API for building `skill://index.json` server-side content
-   in `FinanceApp.McpServer`, and the experimental-usage diagnostic ID to suppress. Still open — the spike
-   only installed core `Microsoft.Agents.AI`; `.UseMcpSkills(...)` (§4.4) wasn't in that package's exported
-   types, so it must come from this alpha package and remains unverified.
-4. **`ModelContextProtocol` vs `ModelContextProtocol.Core`** — confirm which package/namespace
-   `McpClient`/`StdioClientTransport` actually live in.
-5. **`AgentSkillsProviderBuilder`** fluent method signatures — **partially resolved 2026-08-10** via the
-   same reflection dump: `.UseFileSkill(skillPath, options, scriptRunner)`, `.UseFileSkills(...)`,
-   `.UseSkill(AgentSkill)`, `.UseSkills(...)`, `.UseSource(...)`, `.UseFilter(Func<...>)`, `.Build()` all
-   confirmed to exist with roughly the expected shapes. `.UseSkill` takes a plain already-constructed
+3. ~~**`Microsoft.Agents.AI.Mcp`** (alpha)~~ **RESOLVED 2026-08-13** — see §4.4. It is **not** a
+   tool-calling bridge; it's a skill-*distribution* mechanism (`skill://index.json` + live-fetched
+   `SKILL.md`/resources). `FinanceApp.McpServer` itself doesn't reference this package at all — it
+   hand-writes the `skill://index.json` JSON shape directly (`MonthlySummaryResourceHandlers.
+   BuildIndexJson`), confirmed correct via a live client round trip, not by matching a library type.
+4. ~~**`ModelContextProtocol` vs `ModelContextProtocol.Core`**~~ **RESOLVED 2026-08-13** —
+   `McpClient`/`StdioClientTransport`/`StdioClientTransportOptions` live in `ModelContextProtocol.Client`
+   (in the `ModelContextProtocol.Core` assembly, referenced transitively via the `ModelContextProtocol`
+   meta-package); `McpException`/`RequestContext<T>` live in `ModelContextProtocol`/
+   `ModelContextProtocol.Server` respectively. Pinned to **1.2.0** on both client and server — see §4.4.
+5. **`AgentSkillsProviderBuilder`** fluent method signatures — **resolved 2026-08-10/2026-08-13** via
+   reflection dumps: `.UseFileSkill(skillPath, options, scriptRunner)`, `.UseFileSkills(...)`,
+   `.UseSkill(AgentSkill)`, `.UseSkills(...)`, `.UseSource(...)`, `.UseFilter(Func<...>)`,
+   `.UseMcpSkills(McpClient, AgentMcpSkillsSourceOptions)` (from `Microsoft.Agents.AI.Mcp`, item 3 above),
+   `.Build()` all confirmed to exist with the expected shapes. `.UseSkill` takes a plain already-constructed
    `AgentSkill` instance, not a factory delegate — matches the plan (§4.2's per-request inline OCR skill is
    built via `ReceiptOcrSkillFactory.Create(...)` *before* being passed to `.UseSkill(...)`, not deferred to
-   the builder). `.UseMcpSkills` was **not** among core `Microsoft.Agents.AI`'s exported types — still
-   unverified, tracked under item 3 above (comes from the alpha Mcp package).
+   the builder).
 6. Blazor `InputFile` max-size override syntax against the current .NET 10 API.
 7. Confirm `AddAuthentication(IdentityConstants.ApplicationScheme).AddIdentityCookies()` vs
    `AddIdentity<ApplicationUser, IdentityRole<Guid>>()` cookie-scheme interaction against the installed
@@ -813,8 +1010,19 @@ feature; that surface area was unused complexity, not a security decision. If ev
   unit-tested (`tests/FinanceApp.AI.Tests`), wired as `IChatClient`/`IAgentFactory` singletons in
   `Web/Program.cs` (§3.1/§3.2)
 - ~~`src/FinanceApp.Web/Services/ChatSessionService.cs`~~ — **done**, + `Chat.razor`/`AgentActivityLog.razor`
-  + `FinanceApp.AI/SkillActivity.cs`, unit-tested (§3.4/§7) — **next up**: the other 3 skills, MCP server
-- `src/FinanceApp.McpServer/Program.cs` — stdio MCP server; must never write to stdout (§5)
-- `src/FinanceApp.Web/Services/McpServerLauncher.cs` — subprocess lifecycle + graceful degradation (§5)
+  + `FinanceApp.AI/SkillActivity.cs`, unit-tested (§3.4/§7)
+- ~~`src/FinanceApp.McpServer/Program.cs`~~ — **done** (§4.4/§5), **HTTP-migrated 2026-08-14** — standing
+  ASP.NET Core service, JWT bearer auth, serves `skill://index.json` + live-computed monthly-summary
+  resources (superseded the original stdio-per-session design)
+- ~~`src/FinanceApp.Web/Services/McpServerLauncher.cs`~~ — **done** (§4.4/§5), **HTTP-migrated
+  2026-08-14** — connects to the standing HTTP service with a per-session bearer token (`McpAccessTokenIssuer`)
+  + graceful degradation
+- ~~`src/FinanceApp.McpServer/HttpUserContextAccessor.cs`~~ — **done** (§4.4/§5) — per-request claims-based
+  `ICurrentUserAccessor`, the mechanism that keeps user isolation correct now that `McpServer` is shared
+- ~~`src/FinanceApp.Web/Services/McpAccessTokenIssuer.cs`~~ — **done** (§4.4/§5) — mints the per-session JWT
 - ~~`src/FinanceApp.Core/FinanceDbContext.cs`~~ — **done** (§2/§2a/§5)
-- `docker-compose.yml`, `src/FinanceApp.Web/Dockerfile` — multi-stage build bundling both apps (§6)
+- ~~`src/FinanceApp.Core/Repositories/MonthlySummaryRepository.cs`~~ — **done** (§4.4)
+- **All 4 skills are now fully implemented and tested; the MCP skill's HTTP-migration Step 1 is also done.**
+  Remaining items: `docker-compose.yml`/`src/FinanceApp.Web/Dockerfile` (§6, including a new `mcpserver`
+  compose service now that it's a standing HTTP service), and Step 2 (OAuth 2.1 for external MCP clients,
+  deliberately deferred, not started).
