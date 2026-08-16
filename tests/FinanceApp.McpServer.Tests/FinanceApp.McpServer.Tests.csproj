@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+    <!-- test JWTs for McpServerProcessTests' real HTTP round-trip -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
+    <!-- In-process host for the real concurrent multi-user isolation test -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FinanceApp.McpServer\FinanceApp.McpServer.csproj" />
+  </ItemGroup>
+
+  <!-- MonthlySummaryResourceHandlers.ReadSkillMdAsync reads AppContext.BaseDirectory/skills/monthly-summary/
+       SKILL.md — Content items don't propagate across a ProjectReference, so this test project needs its
+       own copy of the same file, same reasoning as every other skills/** Content item in this repo. -->
+  <ItemGroup>
+    <Content Include="..\..\src\FinanceApp.McpServer\skills\**" LinkBase="skills">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
