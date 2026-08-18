@@ -86,6 +86,27 @@ public class SkillActivityExtractorTests
         Assert.Empty(SkillActivityExtractor.Extract(update));
     }
 
+    [Fact]
+    public void DescribeApprovalRequest_NamesTheSkillAndScript_ForARunSkillScriptRequest()
+    {
+        var call = new FunctionCallContent("call-1", AgentSkillsProvider.RunSkillScriptToolName,
+            new Dictionary<string, object?> { ["skillName"] = "budgeting", ["scriptName"] = "add_transaction" });
+        var request = new ToolApprovalRequestContent("req-1", call);
+
+        Assert.Equal("budgeting: run add_transaction", SkillActivityExtractor.DescribeApprovalRequest(request));
+    }
+
+    [Fact]
+    public void DescribeApprovalRequest_ReturnsNull_ForANonFunctionCallToolCall()
+    {
+        // ToolApprovalRequestContent's ToolCall is typed as the base ToolCallContent — this app's own
+        // approval requests are always FunctionCallContent underneath (confirmed by the spike below), but
+        // the extractor must degrade gracefully rather than throw if that ever isn't true.
+        var request = new ToolApprovalRequestContent("req-1", new WebSearchToolCallContent("call-1"));
+
+        Assert.Null(SkillActivityExtractor.DescribeApprovalRequest(request));
+    }
+
     private sealed class EchoSkill : AgentClassSkill<EchoSkill>
     {
         public EchoSkill() : base(argumentMarshaler: null) { }
