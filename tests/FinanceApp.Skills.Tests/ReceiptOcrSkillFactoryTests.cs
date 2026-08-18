@@ -77,6 +77,50 @@ public sealed class ReceiptOcrSkillFactoryTests
     }
 
     [Fact]
+    public async Task Extract_WithTwoOrMorePriorTransactionsAtVendor_OverridesTheVisionGuess()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+        await SeedPastTransactionAsync(dbName, userId, "Corner Cafe receipt", SeedData.DiningCategoryId);
+        await SeedPastTransactionAsync(dbName, userId, "Corner Cafe lunch", SeedData.DiningCategoryId);
+
+        // Vision guesses "Groceries" — history at this vendor says Dining, 2 matching prior transactions.
+        var chatClient = new FakeChatClient("""{"vendor":"Corner Cafe","amount":15,"date":"2026-08-01","category":"Groceries"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        var result = await RunExtractScriptAsync(skill);
+
+        Assert.Contains("category=Dining", result);
+        Assert.Contains("overriding", result, StringComparison.OrdinalIgnoreCase);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal(SeedData.DiningCategoryId, transaction.CategoryId);
+    }
+
+    [Fact]
+    public async Task Extract_WithOnlyOnePriorTransactionAtVendor_DoesNotOverride()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+        await SeedPastTransactionAsync(dbName, userId, "Corner Cafe receipt", SeedData.DiningCategoryId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Corner Cafe","amount":15,"date":"2026-08-01","category":"Groceries"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        var result = await RunExtractScriptAsync(skill);
+
+        Assert.Contains("category=Groceries", result);
+        Assert.DoesNotContain("overriding", result, StringComparison.OrdinalIgnoreCase);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal(SeedData.GroceriesCategoryId, transaction.CategoryId);
+    }
+
+    [Fact]
     public async Task Extract_WhenAmountIsMissing_MarksFailedAndCreatesNoTransaction()
     {
         var dbName = Guid.NewGuid().ToString();
@@ -158,6 +202,23 @@ public sealed class ReceiptOcrSkillFactoryTests
         db.Receipts.Add(receipt);
         await db.SaveChangesAsync();
         return receipt;
+    }
+
+    private static async Task SeedPastTransactionAsync(string dbName, Guid userId, string description, Guid categoryId)
+    {
+        await using var db = await OpenDbAsync(dbName, userId);
+        db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            CategoryId = categoryId,
+            Amount = 1m,
+            OccurredOn = DateOnly.FromDateTime(DateTime.UtcNow),
+            Description = description,
+            Source = TransactionSource.Manual,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
     }
 
     private sealed class FakeChatClient(string jsonResponse) : IChatClient
