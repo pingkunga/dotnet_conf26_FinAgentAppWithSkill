@@ -18,6 +18,26 @@
     <MudStack Spacing="3" Style="max-width: 480px;">
         <MudTextField Value="@username" Label="Username" Disabled="true" />
         <MudTextField @bind-Value="Input.PhoneNumber" For="() => Input.PhoneNumber" Label="Phone number" name="Input.PhoneNumber" />
+
+        <MudText Typo="Typo.subtitle2" Class="mt-4">Chat assistant approvals</MudText>
+        <MudText Typo="Typo.body2" Color="Color.Secondary">
+            When off, the chat assistant pauses and asks you to Approve/Reject before it does this — turn any
+            of these off any time, and back on again whenever you like.
+        </MudText>
+       
+        <div>
+            <label class="d-flex align-center" style="gap:8px; cursor:pointer;">
+                <InputCheckbox @bind-Value="Input.AutoApproveWrites" />
+                <MudText Typo="Typo.body1">Auto-approve writes (transactions, budget changes, receipt saves)</MudText>
+            </label>
+        </div>
+        <div>
+            <label class="d-flex align-center" style="gap:8px; cursor:pointer;">
+                <InputCheckbox @bind-Value="Input.AutoApproveExecuteScript" />
+                <MudText Typo="Typo.body1">Auto-approve script execution (savings calculator's Python subprocess)</MudText>
+            </label>
+        </div>
+
         <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">Save</MudButton>
     </MudStack>
 </EditForm>
@@ -48,10 +68,33 @@
         phoneNumber = await UserManager.GetPhoneNumberAsync(user);
 
         Input.PhoneNumber ??= phoneNumber;
+        // Only seed from the entity on a plain GET. static SSR gives every request — the initial GET *and*
+        // the POST from clicking Save — a brand-new component instance, so there's no persisted
+        // component-instance state that can distinguish "first load" from "form re-post"; a prior attempt
+        // used a `formLoaded` instance field for this and it was broken for exactly that reason (it's also
+        // freshly `false` on the POST, so it silently stomped the just-submitted value back to the stale DB
+        // value on every Save). HttpContext.Request.Method is a reliable signal instead: on POST,
+        // SupplyParameterFromForm already populated Input from the real submission *before* this method
+        // runs (checked -> true from InputCheckbox's own posted value; unchecked -> the key is simply
+        // absent, and InputModel's AutoApproveWrites/AutoApproveExecuteScript have no `= true` initializer
+        // to fall back to, so they bind to bool's own default, false) — re-assigning here on a POST would
+        // discard whatever was actually submitted.
+        if (!HttpMethods.IsPost(HttpContext.Request.Method))
+        {
+            Input.AutoApproveWrites = user.AutoApproveWrites;
+            Input.AutoApproveExecuteScript = user.AutoApproveExecuteScript;
+        }
     }
 
     private async Task OnValidSubmitAsync()
     {
+        // Console.WriteLine("[Manage/Index] OnValidSubmitAsync fired. Posted form fields:");
+        foreach (var kv in HttpContext.Request.Form)
+        {
+            Console.WriteLine($"[Manage/Index]   {kv.Key} = [{string.Join(",", kv.Value.ToArray())}]");
+        }
+        Console.WriteLine($"[Manage/Index] Bound: AutoApproveWrites={Input.AutoApproveWrites}, AutoApproveExecuteScript={Input.AutoApproveExecuteScript}");
+
         if (user is null)
         {
             RedirectManager.RedirectToInvalidUser(UserManager, HttpContext);
@@ -68,6 +111,15 @@
             }
         }
 
+        user.AutoApproveWrites = Input.AutoApproveWrites;
+        user.AutoApproveExecuteScript = Input.AutoApproveExecuteScript;
+        var updateResult = await UserManager.UpdateAsync(user);
+        if (!updateResult.Succeeded)
+        {
+            RedirectManager.RedirectToCurrentPageWithStatus("Error: Failed to save approval preferences.", HttpContext);
+            return;
+        }
+
         await SignInManager.RefreshSignInAsync(user);
         RedirectManager.RedirectToCurrentPageWithStatus("Your profile has been updated", HttpContext);
     }
@@ -77,5 +129,11 @@
         [Phone]
         [Display(Name = "Phone number")]
         public string? PhoneNumber { get; set; }
+
+        [Display(Name = "Auto-approve writes")]
+        public bool AutoApproveWrites { get; set; }
+
+        [Display(Name = "Auto-approve script execution")]
+        public bool AutoApproveExecuteScript { get; set; }
     }
 }

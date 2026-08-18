@@ -10,4 +10,8 @@ namespace FinanceApp.Core.Entities;
 public sealed class ApplicationUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = "";
+
+    // Per-action-kind approval toggles for AgentSkill
+    public bool AutoApproveWrites { get; set; } = true;
+    public bool AutoApproveExecuteScript { get; set; } = true;
 }
