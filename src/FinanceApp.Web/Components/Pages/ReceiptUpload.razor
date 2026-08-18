@@ -1,17 +1,18 @@
 @page "/Receipts"
 @attribute [Authorize]
 @rendermode InteractiveServer
+@implements IAsyncDisposable
 @using FinanceApp.AI
 @using FinanceApp.Core
 @using FinanceApp.Core.Abstractions
 @using FinanceApp.Core.Entities
 @using FinanceApp.Web.Services
-@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.Agents.AI
 @using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.AI
 @inject FinanceDbContext Db
 @inject ICurrentUserAccessor CurrentUser
 @inject ISnackbar Snackbar
-@inject NavigationManager Nav
 @inject ChatSessionService ChatSession
 @inject AiOptions AiOptions
 
@@ -44,40 +45,81 @@
                 <MudImage Src="@previewDataUrl" Width="300" Class="rounded" />
             </MudItem>
             <MudItem xs="12" sm="8">
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" Class="mb-4"
-                           Disabled="@(!AiOptions.SupportsVision)"
-                           OnClick="@(() => Nav.NavigateTo($"/Chat?receiptId={currentReceipt.Id}"))">
-                    Extract with AI
-                </MudButton>
-                @if (!AiOptions.SupportsVision)
+                @* AI extraction runs inline on this page now — no more handing off to /Chat (docs/spec.md's
+                   redesign). Only offered while still Pending, so this also covers retrying an old receipt
+                   reached via the table's Edit button, not just the one just uploaded. *@
+                @if (currentReceipt.OcrStatus == ReceiptOcrStatus.Pending && AiOptions.SupportsVision)
                 {
-                    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
-                        Disabled — this provider can't read images. Fill in the fields manually instead.
-                    </MudText>
-                    <EditForm Model="this" OnValidSubmit="SaveManuallyAsync">
-                        <MudGrid>
-                            <MudItem xs="12" sm="4">
-                                <MudTextField @bind-Value="manualVendor" Label="Vendor" />
-                            </MudItem>
-                            <MudItem xs="12" sm="3">
-                                <MudNumericField T="decimal" @bind-Value="manualAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
-                            </MudItem>
-                            <MudItem xs="12" sm="3">
-                                <MudSelect T="Guid?" @bind-Value="manualCategoryId" Label="Category" Required="true">
-                                    @foreach (var c in categories)
-                                    {
-                                        <MudSelectItem Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
-                                    }
-                                </MudSelect>
-                            </MudItem>
-                            <MudItem xs="12" sm="2">
-                                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Secondary" FullWidth="true">
-                                    Save
-                                </MudButton>
-                            </MudItem>
-                        </MudGrid>
-                    </EditForm>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" Class="mb-2"
+                               Disabled="@(extracting || pendingApprovals.Count > 0)"
+                               OnClick="ExtractWithAiAsync">
+                        Extract with AI
+                    </MudButton>
+                    @if (extracting)
+                    {
+                        <MudProgressCircular Indeterminate="true" Size="Size.Small" Class="ml-2" />
+                    }
+
+                    @foreach (var approval in pendingApprovals)
+                    {
+                        <MudAlert Severity="Severity.Warning" Class="mt-2 mb-2">
+                            <div class="mb-2">Agent wants to: <b>@(SkillActivityExtractor.DescribeApprovalRequest(approval) ?? "(unknown action)")</b></div>
+                            <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled" Class="mr-2"
+                                       OnClick="@(() => RespondToApprovalAsync(approval, approved: true))">
+                                Approve
+                            </MudButton>
+                            <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined"
+                                       OnClick="@(() => RespondToApprovalAsync(approval, approved: false))">
+                                Reject
+                            </MudButton>
+                        </MudAlert>
+                    }
+
+                    @if (activityLog.Count > 0)
+                    {
+                        <div class="mb-2"><AgentActivityLog Entries="activityLog" /></div>
+                    }
+
+                    @if (!string.IsNullOrEmpty(extractionResultText))
+                    {
+                        <MudAlert Severity="Severity.Info" Class="mb-4">@extractionResultText</MudAlert>
+                    }
                 }
+
+                <MudText Typo="Typo.subtitle2" Class="mb-2">
+                    @(currentReceipt.ResultingTransactionId is null ? "Enter details manually" : "Edit details")
+                </MudText>
+                <EditForm Model="this" OnValidSubmit="SaveOrUpdateAsync">
+                    <MudGrid>
+                        <MudItem xs="12" sm="3">
+                            <MudTextField @bind-Value="manualVendor" Label="Vendor" />
+                        </MudItem>
+                        <MudItem xs="12" sm="2">
+                            <MudNumericField T="decimal" @bind-Value="manualAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
+                        </MudItem>
+                        <MudItem xs="12" sm="3">
+                            <MudSelect T="Guid?" @bind-Value="manualCategoryId" Label="Category" Required="true">
+                                @foreach (var c in categories)
+                                {
+                                    <MudSelectItem Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" sm="2">
+                            <MudDatePicker @bind-Date="manualDate" Label="Date" Editable="true" />
+                        </MudItem>
+                        <MudItem xs="6" sm="1" Class="d-flex align-center">
+                            <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Secondary" FullWidth="true">
+                                Save
+                            </MudButton>
+                        </MudItem>
+                        <MudItem xs="6" sm="1" Class="d-flex align-center">
+                            <MudButton Variant="Variant.Text" FullWidth="true" OnClick="CancelEdit">
+                                Cancel
+                            </MudButton>
+                        </MudItem>
+                    </MudGrid>
+                </EditForm>
             </MudItem>
         </MudGrid>
     </MudPaper>
@@ -89,6 +131,8 @@
         <MudTh>Status</MudTh>
         <MudTh>Vendor</MudTh>
         <MudTh>Amount</MudTh>
+        <MudTh>Category</MudTh>
+        <MudTh>Actions</MudTh>
     </HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="Uploaded">@context.UploadedAtUtc.ToLocalTime().ToString("g")</MudTd>
@@ -97,6 +141,11 @@
         </MudTd>
         <MudTd DataLabel="Vendor">@(context.ExtractedVendor ?? "—")</MudTd>
         <MudTd DataLabel="Amount">@(context.ExtractedAmount?.ToString("C") ?? "—")</MudTd>
+        <MudTd DataLabel="Category">@(context.ExtractedCategory?.Name ?? "—")</MudTd>
+        <MudTd DataLabel="Actions">
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error" OnClick="@(() => DeleteAsync(context))">Delete</MudButton>
+        </MudTd>
     </RowTemplate>
     <NoRecordsContent>
         <MudText>No receipts uploaded yet.</MudText>
@@ -119,6 +168,18 @@
     private string manualVendor = "";
     private decimal manualAmount;
     private Guid? manualCategoryId;
+    private DateTime? manualDate;
+
+    // Inline AI-extraction state — ChatSession.SendAsync/ResumeWithApprovalAsync drives the same
+    // AIAgent/AgentSession Chat.razor uses (ChatSessionService is scoped per Blazor circuit), just drained
+    // into this page's own state instead of a chat bubble. Mirrors Chat.razor's
+    // DrainAsync/RespondToApprovalAsync shape (docs/spec.md's redesign — no more /Chat?receiptId= handoff).
+    private bool extracting;
+    private string? extractionResultText;
+    private readonly List<ToolApprovalRequestContent> pendingApprovals = [];
+    private readonly List<SkillActivityEntry> activityLog = [];
+    private CancellationTokenSource? cts;
+    private bool disposed;
 
     protected override async Task OnInitializedAsync()
     {
@@ -129,7 +190,14 @@
     private async Task LoadReceiptsAsync()
     {
         loadingList = true;
-        receipts = await Db.Receipts.OrderByDescending(r => r.UploadedAtUtc).ToListAsync();
+        // AsNoTracking — the extraction skill script writes through its own FinanceDbContext instance
+        // (ReceiptOcrSkillFactory.CreateDbContext), not this page's injected Db, so tracking here would
+        // risk EF's identity map handing back a stale already-tracked row instead of the fresh one.
+        receipts = await Db.Receipts
+            .AsNoTracking()
+            .Include(r => r.ExtractedCategory)
+            .OrderByDescending(r => r.UploadedAtUtc)
+            .ToListAsync();
         loadingList = false;
     }
 
@@ -162,15 +230,11 @@
             await Db.SaveChangesAsync();
 
             // Registers the per-receipt inline skill into the (possibly already-running) chat session —
-            // safe to call before Chat.razor has ever been visited; the skill just sits in the list until
-            // an agent exists (docs/spec.md §4.2).
+            // safe to call before any chat/extraction has ever happened; the skill just sits in the list
+            // until ExtractWithAiAsync (or Chat.razor, if ever visited independently) uses it.
             ChatSession.RegisterReceiptSkill(receipt.Id);
 
-            currentReceipt = receipt;
-            previewDataUrl = $"data:{receipt.ContentType};base64,{Convert.ToBase64String(bytes)}";
-            manualVendor = "";
-            manualAmount = 0;
-            manualCategoryId = null;
+            SetCurrentReceipt(receipt);
 
             await LoadReceiptsAsync();
         }
@@ -184,7 +248,171 @@
         }
     }
 
-    private async Task SaveManuallyAsync()
+    private async Task ExtractWithAiAsync()
+    {
+        if (currentReceipt is null || extracting)
+        {
+            return;
+        }
+
+        cts?.Cancel();
+        cts?.Dispose();
+        cts = new CancellationTokenSource();
+
+        extracting = true;
+        extractionResultText = null;
+        pendingApprovals.Clear();
+        activityLog.Clear();
+
+        // Same instruction text Chat.razor used to pre-fill via ?receiptId= — names the exact skill, since
+        // every dynamically-registered receipt skill shares the same description.
+        var message = $"Please load the skill named \"receipt-ocr-{currentReceipt.Id:N}\" and run its " +
+                      "extract_receipt script to OCR this receipt and record it as a transaction.";
+
+        try
+        {
+            await DrainAsync(ChatSession.SendAsync(message, cts.Token));
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer action, or the component was disposed — not an error.
+        }
+        catch (Exception ex)
+        {
+            extractionResultText = $"(error: {ex.Message})";
+        }
+        finally
+        {
+            extracting = false;
+            if (pendingApprovals.Count == 0)
+            {
+                await RefreshAfterExtractionAsync();
+            }
+            if (!disposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Same shape as Chat.razor's DrainAsync — appends streamed text, activity-log entries, and any
+    /// pending <see cref="ToolApprovalRequestContent"/> the stream stops on (the enumeration simply ends,
+    /// no exception) into this page's own extraction state instead of a chat bubble.
+    /// </summary>
+    private async Task DrainAsync(IAsyncEnumerable<AgentResponseUpdate> stream)
+    {
+        await foreach (var update in stream)
+        {
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                extractionResultText += update.Text;
+            }
+
+            activityLog.AddRange(SkillActivityExtractor.Extract(update));
+            pendingApprovals.AddRange(update.Contents.OfType<ToolApprovalRequestContent>());
+
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RespondToApprovalAsync(ToolApprovalRequestContent request, bool approved)
+    {
+        pendingApprovals.Remove(request);
+        if (cts is null)
+        {
+            return;
+        }
+
+        extracting = true;
+        await InvokeAsync(StateHasChanged);
+
+        var response = request.CreateResponse(approved, reason: null);
+        try
+        {
+            await DrainAsync(ChatSession.ResumeWithApprovalAsync(response, cts.Token));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            extractionResultText += $"\n\n(error: {ex.Message})";
+        }
+        finally
+        {
+            extracting = false;
+            if (pendingApprovals.Count == 0)
+            {
+                await RefreshAfterExtractionAsync();
+            }
+            if (!disposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task RefreshAfterExtractionAsync()
+    {
+        if (currentReceipt is null)
+        {
+            return;
+        }
+
+        var refreshed = await Db.Receipts.AsNoTracking().FirstOrDefaultAsync(r => r.Id == currentReceipt.Id);
+        if (refreshed is not null)
+        {
+            currentReceipt = refreshed;
+            manualVendor = refreshed.ExtractedVendor ?? "";
+            manualAmount = refreshed.ExtractedAmount ?? 0;
+            manualCategoryId = refreshed.ExtractedCategoryId;
+            manualDate = refreshed.ExtractedDate?.ToDateTime(TimeOnly.MinValue);
+        }
+
+        await LoadReceiptsAsync();
+    }
+
+    private void StartEdit(Receipt receipt) => SetCurrentReceipt(receipt);
+
+    private void SetCurrentReceipt(Receipt receipt)
+    {
+        currentReceipt = receipt;
+        previewDataUrl = $"data:{receipt.ContentType};base64,{Convert.ToBase64String(receipt.ImageBytes)}";
+        manualVendor = receipt.ExtractedVendor ?? "";
+        manualAmount = receipt.ExtractedAmount ?? 0;
+        manualCategoryId = receipt.ExtractedCategoryId;
+        manualDate = receipt.ExtractedDate?.ToDateTime(TimeOnly.MinValue);
+        extracting = false;
+        extractionResultText = null;
+        pendingApprovals.Clear();
+        activityLog.Clear();
+    }
+
+    private void CancelEdit()
+    {
+        currentReceipt = null;
+        previewDataUrl = null;
+        manualVendor = "";
+        manualAmount = 0;
+        manualCategoryId = null;
+        manualDate = null;
+        extracting = false;
+        extractionResultText = null;
+        pendingApprovals.Clear();
+        activityLog.Clear();
+    }
+
+    /// <summary>
+    /// Creates or updates the Transaction resulting from this receipt — this form now doubles as both the
+    /// no-vision manual-entry fallback and a general correction path for any receipt's extracted fields
+    /// (docs/spec.md's redesign; it used to only appear when !AiOptions.SupportsVision and only ever
+    /// created a transaction). Updating an already-linked Transaction leaves OcrStatus unchanged — a human
+    /// correcting one field doesn't retroactively make a Succeeded extraction "not AI's doing". OcrStatus
+    /// only becomes Unsupported the first time this method creates a Transaction from scratch, matching the
+    /// original manual-entry semantics.
+    /// </summary>
+    private async Task SaveOrUpdateAsync()
     {
         if (currentReceipt is null || manualAmount <= 0 || manualCategoryId is null)
         {
@@ -192,40 +420,82 @@
             return;
         }
 
-        var transaction = new Transaction
-        {
-            Id = Guid.NewGuid(),
-            UserId = CurrentUser.UserId!.Value,
-            CategoryId = manualCategoryId.Value,
-            Amount = manualAmount,
-            OccurredOn = DateOnly.FromDateTime(DateTime.UtcNow),
-            Description = string.IsNullOrWhiteSpace(manualVendor) ? null : manualVendor,
-            Source = TransactionSource.Manual,
-            ReceiptId = currentReceipt.Id,
-            CreatedAtUtc = DateTime.UtcNow,
-        };
-        Db.Transactions.Add(transaction);
-
         var receipt = await Db.Receipts.FirstAsync(r => r.Id == currentReceipt.Id);
-        receipt.OcrStatus = ReceiptOcrStatus.Unsupported;
-        receipt.ExtractedVendor = manualVendor;
+        var occurredOn = manualDate is null ? DateOnly.FromDateTime(DateTime.UtcNow) : DateOnly.FromDateTime(manualDate.Value);
+        var vendor = string.IsNullOrWhiteSpace(manualVendor) ? null : manualVendor;
+
+        if (receipt.ResultingTransactionId is { } transactionId)
+        {
+            var transaction = await Db.Transactions.FirstAsync(t => t.Id == transactionId);
+            transaction.Amount = manualAmount;
+            transaction.CategoryId = manualCategoryId;
+            transaction.Description = vendor;
+            transaction.OccurredOn = occurredOn;
+        }
+        else
+        {
+            var transaction = new Transaction
+            {
+                Id = Guid.NewGuid(),
+                UserId = CurrentUser.UserId!.Value,
+                CategoryId = manualCategoryId.Value,
+                Amount = manualAmount,
+                OccurredOn = occurredOn,
+                Description = vendor,
+                Source = TransactionSource.Manual,
+                ReceiptId = receipt.Id,
+                CreatedAtUtc = DateTime.UtcNow,
+            };
+            Db.Transactions.Add(transaction);
+            receipt.ResultingTransactionId = transaction.Id;
+            receipt.OcrStatus = ReceiptOcrStatus.Manual;
+        }
+
+        receipt.ExtractedVendor = vendor;
         receipt.ExtractedAmount = manualAmount;
         receipt.ExtractedCategoryId = manualCategoryId;
-        receipt.ResultingTransactionId = transaction.Id;
+        receipt.ExtractedDate = occurredOn;
 
         await Db.SaveChangesAsync();
 
-        currentReceipt = null;
-        previewDataUrl = null;
+        CancelEdit();
         await LoadReceiptsAsync();
-        Snackbar.Add("Transaction recorded.", Severity.Success);
+        Snackbar.Add("Receipt saved.", Severity.Success);
+    }
+
+    /// <summary>
+    /// Deletes only the Receipt row — Transaction.ReceiptId is configured DeleteBehavior.SetNull
+    /// (FinanceDbContext.cs), so a resulting Transaction is detached, not deleted, matching the existing
+    /// schema's own intent: a receipt is source material for a transaction, not the transaction itself.
+    /// </summary>
+    private async Task DeleteAsync(Receipt receipt)
+    {
+        var tracked = await Db.Receipts.FirstAsync(r => r.Id == receipt.Id);
+        Db.Receipts.Remove(tracked);
+        await Db.SaveChangesAsync();
+
+        if (currentReceipt?.Id == receipt.Id)
+        {
+            CancelEdit();
+        }
+
+        await LoadReceiptsAsync();
+        Snackbar.Add("Receipt deleted.", Severity.Info);
     }
 
     private static Color StatusColor(ReceiptOcrStatus status) => status switch
     {
         ReceiptOcrStatus.Succeeded => Color.Success,
         ReceiptOcrStatus.Failed => Color.Error,
-        ReceiptOcrStatus.Unsupported => Color.Default,
+        ReceiptOcrStatus.Manual => Color.Default,
         _ => Color.Warning,
     };
+
+    public ValueTask DisposeAsync()
+    {
+        disposed = true;
+        cts?.Cancel();
+        cts?.Dispose();
+        return ValueTask.CompletedTask;
+    }
 }
