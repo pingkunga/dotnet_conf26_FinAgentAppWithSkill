@@ -14,7 +14,7 @@
 <MudText Typo="Typo.h5" Class="mb-4">Transactions</MudText>
 
 <MudPaper Class="pa-4 mb-4">
-    <EditForm Model="this" OnValidSubmit="AddTransactionAsync">
+    <EditForm Model="this" OnValidSubmit="SaveTransactionAsync">
         <MudGrid>
             <MudItem xs="12" sm="3">
                 <MudSelect T="Guid?" @bind-Value="categoryId" Label="Category" Required="true">
@@ -34,7 +34,9 @@
                 <MudTextField @bind-Value="description" Label="Description" />
             </MudItem>
             <MudItem xs="12" sm="1" Class="d-flex align-center">
-                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">Add</MudButton>
+                <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true">
+                    @(editingId is null ? "Add" : "Save")
+                </MudButton>
             </MudItem>
         </MudGrid>
     </EditForm>
@@ -47,7 +49,7 @@
         <MudTh>Amount</MudTh>
         <MudTh>Description</MudTh>
         <MudTh>Source</MudTh>
-        <MudTh></MudTh>
+        <MudTh>Actions</MudTh>
     </HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="Date">@context.OccurredOn.ToString("yyyy-MM-dd")</MudTd>
@@ -55,8 +57,9 @@
         <MudTd DataLabel="Amount">@context.Amount.ToString("C")</MudTd>
         <MudTd DataLabel="Description">@context.Description</MudTd>
         <MudTd DataLabel="Source">@context.Source</MudTd>
-        <MudTd>
-            <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" OnClick="() => DeleteTransactionAsync(context)" />
+        <MudTd DataLabel="Actions">
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error" OnClick="@(() => DeleteTransactionAsync(context))">Delete</MudButton>
         </MudTd>
     </RowTemplate>
     <NoRecordsContent>
@@ -69,6 +72,7 @@
     private List<Transaction> transactions = [];
     private bool loading = true;
 
+    private Guid? editingId;
     private Guid? categoryId;
     private decimal amount;
     private DateTime? occurredOn = DateTime.Today;
@@ -91,7 +95,7 @@
         loading = false;
     }
 
-    private async Task AddTransactionAsync()
+    private async Task SaveTransactionAsync()
     {
         if (categoryId is null || amount <= 0)
         {
@@ -99,34 +103,71 @@
             return;
         }
 
-        Db.Transactions.Add(new Transaction
+        var occurredOnDate = DateOnly.FromDateTime(occurredOn ?? DateTime.Today);
+        var trimmedDescription = string.IsNullOrWhiteSpace(description) ? null : description;
+
+        if (editingId is null)
         {
-            Id = Guid.NewGuid(),
-            UserId = CurrentUser.UserId!.Value,
-            CategoryId = categoryId,
-            Amount = amount,
-            OccurredOn = DateOnly.FromDateTime(occurredOn ?? DateTime.Today),
-            Description = string.IsNullOrWhiteSpace(description) ? null : description,
-            Source = TransactionSource.Manual,
-            CreatedAtUtc = DateTime.UtcNow,
-        });
+            Db.Transactions.Add(new Transaction
+            {
+                Id = Guid.NewGuid(),
+                UserId = CurrentUser.UserId!.Value,
+                CategoryId = categoryId,
+                Amount = amount,
+                OccurredOn = occurredOnDate,
+                Description = trimmedDescription,
+                Source = TransactionSource.Manual,
+                CreatedAtUtc = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            // Edit existing transaction
+            var existing = await Db.Transactions.FirstOrDefaultAsync(t => t.Id == editingId);
+            if (existing is not null)
+            {
+                existing.CategoryId = categoryId;
+                existing.Amount = amount;
+                existing.OccurredOn = occurredOnDate;
+                existing.Description = trimmedDescription;
+            }
+        }
 
         await Db.SaveChangesAsync();
-
-        categoryId = null;
-        amount = 0;
-        description = null;
-        occurredOn = DateTime.Today;
-
+        ResetForm();
         await LoadTransactionsAsync();
-        Snackbar.Add("Transaction added.", Severity.Success);
+        Snackbar.Add(editingId is null ? "Transaction added." : "Transaction saved.", Severity.Success);
+    }
+
+    private void StartEdit(Transaction transaction)
+    {
+        editingId = transaction.Id;
+        categoryId = transaction.CategoryId;
+        amount = transaction.Amount;
+        occurredOn = transaction.OccurredOn.ToDateTime(TimeOnly.MinValue);
+        description = transaction.Description;
     }
 
     private async Task DeleteTransactionAsync(Transaction transaction)
     {
         Db.Transactions.Remove(transaction);
         await Db.SaveChangesAsync();
+
+        if (transaction.Id == editingId)
+        {
+            ResetForm();
+        }
+
         await LoadTransactionsAsync();
         Snackbar.Add("Transaction deleted.", Severity.Info);
+    }
+
+    private void ResetForm()
+    {
+        editingId = null;
+        categoryId = null;
+        amount = 0;
+        description = null;
+        occurredOn = DateTime.Today;
     }
 }

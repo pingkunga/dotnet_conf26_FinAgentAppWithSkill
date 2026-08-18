@@ -45,6 +45,7 @@
         <MudTh>Limit</MudTh>
         <MudTh>Usage</MudTh>
         <MudTh>Status</MudTh>
+        <MudTh>Actions</MudTh>
     </HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="Category">@context.CategoryName</MudTd>
@@ -69,6 +70,10 @@
             {
                 <MudChip T="string" Color="Color.Success" Size="Size.Small">OK</MudChip>
             }
+        </MudTd>
+        <MudTd DataLabel="Actions">
+            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error" OnClick="@(() => DeleteBudgetAsync(context))">Delete</MudButton>
         </MudTd>
     </RowTemplate>
     <NoRecordsContent>
@@ -136,5 +141,29 @@
 
         await LoadStatusAsync();
         Snackbar.Add("Budget saved.", Severity.Success);
+    }
+
+    // Start editing an existing budget by pre-filling the form with its values. The user can then change the limit and save, which will update the existing budget.
+    private void StartEdit(BudgetStatus status)
+    {
+        categoryId = status.CategoryId;
+        limitAmount = status.LimitAmount;
+    }
+
+    private async Task DeleteBudgetAsync(BudgetStatus status)
+    {
+        var period = new DateOnly((periodMonth ?? DateTime.Today).Year, (periodMonth ?? DateTime.Today).Month, 1);
+
+        var existing = await Db.Budgets.FirstOrDefaultAsync(b =>
+            b.UserId == CurrentUser.UserId && b.CategoryId == status.CategoryId && b.PeriodMonth == period);
+
+        if (existing is not null)
+        {
+            Db.Budgets.Remove(existing);
+            await Db.SaveChangesAsync();
+        }
+
+        await LoadStatusAsync();
+        Snackbar.Add("Budget deleted.", Severity.Info);
     }
 }
