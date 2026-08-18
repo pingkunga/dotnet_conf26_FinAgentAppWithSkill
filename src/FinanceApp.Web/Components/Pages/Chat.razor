@@ -6,6 +6,8 @@
 @using FinanceApp.Core
 @using FinanceApp.Web.Services
 @using Markdig
+@using Microsoft.Agents.AI
+@using Microsoft.Extensions.AI
 @inject ChatSessionService ChatSession
 @inject FinanceDbContext Db
 
@@ -42,10 +44,24 @@
                 <MudProgressCircular Indeterminate="true" Size="Size.Small" />
             }
         </MudPaper>
+        @foreach (var approval in pendingApprovals)
+        {
+            <MudAlert Severity="Severity.Warning" Class="mb-2">
+                <div class="mb-2">Agent wants to: <b>@(SkillActivityExtractor.DescribeApprovalRequest(approval) ?? "(unknown action)")</b></div>
+                <MudButton Size="Size.Small" Color="Color.Success" Variant="Variant.Filled" Class="mr-2"
+                           OnClick="@(() => RespondToApprovalAsync(approval, approved: true))">
+                    Approve
+                </MudButton>
+                <MudButton Size="Size.Small" Color="Color.Error" Variant="Variant.Outlined"
+                           OnClick="@(() => RespondToApprovalAsync(approval, approved: false))">
+                    Reject
+                </MudButton>
+            </MudAlert>
+        }
         <MudPaper Class="pa-2 d-flex gap-2">
             <MudTextField @bind-Value="input" name="ChatInput" Label="Message" FullWidth="true"
-                          Disabled="isStreaming" OnKeyDown="OnInputKeyDown" Immediate="true" />
-            <MudButton OnClick="SendAsync" Disabled="@(isStreaming || string.IsNullOrWhiteSpace(input))"
+                          Disabled="@(isStreaming || pendingApprovals.Count > 0)" OnKeyDown="OnInputKeyDown" Immediate="true" />
+            <MudButton OnClick="SendAsync" Disabled="@(isStreaming || pendingApprovals.Count > 0 || string.IsNullOrWhiteSpace(input))"
                        Color="Color.Primary" Variant="Variant.Filled">
                 Send
             </MudButton>
@@ -75,19 +91,19 @@
     [SupplyParameterFromQuery(Name = "goalId")]
     public Guid? GoalId { get; set; }
 
-    // ReceiptUpload.razor's "Extract with AI" button navigates here as /Chat?receiptId=<guid>, same shape
-    // as ?goalId= above (docs/spec.md §4.2/§7) — the receipt-OCR inline skill is already registered into
-    // this session by ChatSessionService.RegisterReceiptSkill at upload time; this just pre-fills a prompt
-    // asking the agent to run it.
-    [SupplyParameterFromQuery(Name = "receiptId")]
-    public Guid? ReceiptId { get; set; }
-
     private readonly List<ChatEntry> messages = [];
     private readonly List<SkillActivityEntry> activityLog = [];
+    // Populated whenever a stream stops on a gated run_skill_script call (SkillApprovalPolicy,
+    // docs/spec.md's approval-toggle plan) — the agent framework surfaces a ToolApprovalRequestContent and
+    // the enumeration simply ends, no exception (same 2026-08-11 spike SkillActivityExtractor's doc comment
+    // already references). Cleared at the start of every fresh SendAsync; resolved one at a time via
+    // RespondToApprovalAsync, which resumes into the same assistant bubble rather than starting a new one.
+    private readonly List<ToolApprovalRequestContent> pendingApprovals = [];
     private string input = "";
     private bool isStreaming;
     private bool disposed;
     private CancellationTokenSource? cts;
+    private ChatEntry? lastAssistantEntry;
 
     protected override async Task OnInitializedAsync()
     {
@@ -106,19 +122,6 @@
                         (goal.TargetDate is { } targetDate ? $", target date {targetDate:d}" : "") +
                         (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {contribution:C}" : "") +
                         ". Give me guidance on this goal, and an exact projection if you can.";
-            }
-        }
-        else if (ReceiptId is { } receiptId)
-        {
-            var receipt = await Db.Receipts.FindAsync(receiptId);
-            if (receipt is not null)
-            {
-                // Names the exact skill, not just "the receipt I uploaded" — every dynamically-registered
-                // receipt skill has the same description (ReceiptOcrSkillFactory.Create), so if more than
-                // one receipt is pending in this session, only the exact name in the prompt disambiguates
-                // which load_skill call is the right one.
-                input = $"Please load the skill named \"receipt-ocr-{receipt.Id:N}\" and run its " +
-                        "extract_receipt script to OCR this receipt and record it as a transaction.";
             }
         }
     }
@@ -140,26 +143,16 @@
 
         var userMessage = input;
         input = "";
+        pendingApprovals.Clear();
         messages.Add(new ChatEntry(IsUser: true, Text: userMessage));
         var assistantEntry = new ChatEntry(IsUser: false, Text: "");
         messages.Add(assistantEntry);
+        lastAssistantEntry = assistantEntry;
         isStreaming = true;
 
         try
         {
-            await foreach (var update in ChatSession.SendAsync(userMessage, cts.Token))
-            {
-                if (!string.IsNullOrEmpty(update.Text))
-                {
-                    assistantEntry.Text += update.Text;
-                }
-
-                activityLog.AddRange(SkillActivityExtractor.Extract(update));
-
-                // The await foreach continuation runs off the Blazor sync context — every state mutation
-                // needs to go back through InvokeAsync to actually re-render (docs/spec.md §7).
-                await InvokeAsync(StateHasChanged);
-            }
+            await DrainAsync(ChatSession.SendAsync(userMessage, cts.Token), assistantEntry);
         }
         catch (OperationCanceledException)
         {
@@ -176,6 +169,64 @@
             // through the OperationCanceledException branch and lands here — InvokeAsync on an
             // already-disposed component/renderer throws, so guard it rather than let that escape into
             // the circuit.
+            if (!disposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Shared by <see cref="SendAsync"/> and <see cref="RespondToApprovalAsync"/> — both drain an
+    /// <see cref="AgentResponseUpdate"/> stream into the same running assistant bubble, appending text,
+    /// extracting activity-log entries, and collecting any <see cref="ToolApprovalRequestContent"/> the
+    /// stream stops on (docs/spec.md's approval-toggle plan) — the same one-bubble-per-turn shape whether
+    /// the turn resolves in one pass or pauses for an approval click first.
+    /// </summary>
+    private async Task DrainAsync(IAsyncEnumerable<AgentResponseUpdate> stream, ChatEntry assistantEntry)
+    {
+        await foreach (var update in stream)
+        {
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                assistantEntry.Text += update.Text;
+            }
+
+            activityLog.AddRange(SkillActivityExtractor.Extract(update));
+            pendingApprovals.AddRange(update.Contents.OfType<ToolApprovalRequestContent>());
+
+            // The await foreach continuation runs off the Blazor sync context — every state mutation
+            // needs to go back through InvokeAsync to actually re-render (docs/spec.md §7).
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RespondToApprovalAsync(ToolApprovalRequestContent request, bool approved)
+    {
+        pendingApprovals.Remove(request);
+        if (lastAssistantEntry is null || cts is null)
+        {
+            return;
+        }
+
+        isStreaming = true;
+        await InvokeAsync(StateHasChanged);
+
+        var response = request.CreateResponse(approved, reason: null);
+        try
+        {
+            await DrainAsync(ChatSession.ResumeWithApprovalAsync(response, cts.Token), lastAssistantEntry);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            lastAssistantEntry.Text += $"\n\n(error: {ex.Message})";
+        }
+        finally
+        {
+            isStreaming = false;
             if (!disposed)
             {
                 await InvokeAsync(StateHasChanged);
