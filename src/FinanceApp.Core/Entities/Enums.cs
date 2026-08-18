@@ -18,5 +18,5 @@ public enum ReceiptOcrStatus
     Pending,
     Succeeded,
     Failed,
-    Unsupported,
+    Manual,
 }
