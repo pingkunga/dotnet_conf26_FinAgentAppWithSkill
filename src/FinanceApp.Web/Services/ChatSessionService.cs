@@ -2,9 +2,11 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using FinanceApp.AI;
 using FinanceApp.Core.Abstractions;
+using FinanceApp.Core.Entities;
 using FinanceApp.Skills;
 using FinanceApp.Skills.Budgeting;
 using FinanceApp.Skills.ReceiptOcr;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Client;
@@ -29,7 +31,8 @@ public sealed class ChatSessionService(
     IServiceScopeFactory scopeFactory,
     IChatClient chatClient,
     AiOptions aiOptions,
-    McpServerLauncher mcpServerLauncher) : IAsyncDisposable
+    McpServerLauncher mcpServerLauncher,
+    UserManager<ApplicationUser> userManager) : IAsyncDisposable
 {
     private const string SystemInstructions =
         "You are a helpful personal finance assistant for this app. Use the available skills to look up " +
@@ -52,6 +55,18 @@ public sealed class ChatSessionService(
 
     public IAsyncEnumerable<AgentResponseUpdate> SendAsync(string message, CancellationToken cancellationToken) =>
         SendAsyncCore(message, cancellationToken);
+
+    /// <summary>
+    /// Resumes a run that stopped on a pending <see cref="ToolApprovalRequestContent"/> — the approval
+    /// pipeline surfaces those instead of executing the gated <c>run_skill_script</c> call
+    /// (<see cref="SkillApprovalPolicy"/>), and the stream simply ends with no exception (confirmed via the
+    /// same 2026-08-11 spike <see cref="SkillActivityExtractor"/>'s doc comment references). Feeding the
+    /// matching <see cref="ToolApprovalResponseContent"/> back in as a single <see cref="ChatMessage"/>
+    /// continues the same <see cref="AgentSession"/> rather than starting a new turn.
+    /// </summary>
+    public IAsyncEnumerable<AgentResponseUpdate> ResumeWithApprovalAsync(
+        ToolApprovalResponseContent response, CancellationToken cancellationToken) =>
+        ResumeWithApprovalAsyncCore(response, cancellationToken);
 
     /// <summary>
     /// Builds a fresh receipt-OCR inline skill for <paramref name="receiptId"/> (closing over the app's
@@ -81,6 +96,21 @@ public sealed class ChatSessionService(
         }
     }
 
+    private async IAsyncEnumerable<AgentResponseUpdate> ResumeWithApprovalAsyncCore(
+        ToolApprovalResponseContent response, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (_agent is null || _session is null)
+        {
+            throw new InvalidOperationException("Cannot resume an approval before a session has been started.");
+        }
+
+        var message = new ChatMessage(ChatRole.User, [response]);
+        await foreach (var update in _agent.RunStreamingAsync(message, _session, cancellationToken: cancellationToken))
+        {
+            yield return update;
+        }
+    }
+
     private async Task<AIAgent> GetOrCreateAgentAsync(CancellationToken cancellationToken)
     {
         if (_agent is not null)
@@ -94,6 +124,13 @@ public sealed class ChatSessionService(
         // agent with no user scope.
         var userId = currentUserAccessor.UserId
             ?? throw new InvalidOperationException("ChatSessionService requires an authenticated user.");
+
+        // The per-skill approval preferences (docs/spec.md's approval-toggle plan) live on ApplicationUser
+        // itself, not on ICurrentUserAccessor — resolved once here, same "cached on _agent for the rest of
+        // this circuit" lifetime as everything else built in this method. A mid-session Profile change
+        // takes effect next circuit, not retroactively — an accepted limitation, not a bug.
+        var user = await userManager.FindByIdAsync(userId.ToString())
+            ?? throw new InvalidOperationException("ChatSessionService requires a resolvable ApplicationUser.");
 
         var budgetSkill = new BudgetSkill(scopeFactory, userId);
         var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills");
@@ -132,19 +169,34 @@ public sealed class ChatSessionService(
         var skillsProvider = skillsBuilder
             .UseOptions(o =>
             {
-                // This app has no tool-approval UI (never designed one) — auto-approve. Every script is
-                // already hard-scoped to `userId` captured above regardless of approval (docs/spec.md §2a
-                // point 7), so the approval gate would only ever be a no-op confirmation, not a security
-                // boundary. Found via a scratchpad spike (2026-08-11): without this, load_skill/
-                // run_skill_script emit a ToolApprovalRequestContent and the stream just stops — no
-                // exception, chat looks permanently "stuck".
+                // Reads are never gated, regardless of any per-skill toggle — load_skill/read_skill_resource
+                // stay silent for every skill, including MCP's monthly-summary (docs/spec.md's
+                // approval-toggle plan). run_skill_script now always goes through the approval pipeline;
+                // whether a given call actually stops for a human is decided per-call by
+                // SkillApprovalPolicy below, not by this flag. Found via a scratchpad spike (2026-08-11):
+                // without disabling the first two, load_skill/read_skill_resource would also emit a
+                // ToolApprovalRequestContent and the stream would just stop — no exception, chat looks
+                // permanently "stuck" — which is exactly why this app previously auto-approved all three.
                 o.DisableLoadSkillApproval = true;
                 o.DisableReadSkillResourceApproval = true;
-                o.DisableRunSkillScriptApproval = true;
+                o.DisableRunSkillScriptApproval = false;
             })
             .Build();
 
-        _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions);
+        // Wired into AgentFactory's HarnessAgentOptions.ToolApprovalAgentOptions (docs/spec.md's
+        // approval-toggle plan) — always applied, even when both preferences are true, because it's also
+        // what keeps read-only script calls (check_budget_status, list_transactions) from ever surfacing
+        // an approval prompt now that DisableRunSkillScriptApproval is false above.
+        var toolApprovalOptions = new ToolApprovalAgentOptions
+        {
+            AutoApprovalRules =
+            [
+                SkillApprovalPolicy.BuildAutoApprovalRule(user.AutoApproveWrites, user.AutoApproveExecuteScript),
+            ],
+        };
+
+        _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions, toolApprovalOptions);
+
         return _agent;
     }
 

@@ -17,6 +17,13 @@
     <!-- Chat.razor markdown rendering (docs/spec.md §7) — github.com/xoofx/markdig -->
     <PackageVersion Include="Markdig" Version="1.3.2" />
     <PackageVersion Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <!--
+      AgentFactory's construction path (docs/spec.md's approval-toggle plan, superseding the earlier
+      AsAIAgent + manual ToolApprovalAgent wrap). Note: HarnessAgentOptions ships marked
+      [Experimental("MAAI001")] in this version despite Harness itself being announced GA — AgentFactory.cs
+      suppresses that diagnostic narrowly around its construction, not project-wide.
+    -->
+    <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.8.3" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.10" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
