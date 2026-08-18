@@ -109,6 +109,20 @@ public static class ReceiptOcrSkillFactory
 
         var category = await FindCategoryAsync(db, extracted.Category)
             ?? await db.Categories.FirstAsync(c => c.Id == SeedData.OtherCategoryId);
+
+        
+        // grounding the AI's guess in the user's own history is a deliberate design choice 
+        string? historyNote = null;
+        if (extracted.Vendor is { Length: > 0 } vendor)
+        {
+            var (historicalCategory, matchCount) = await FindVendorHistoryCategoryAsync(db, userId, vendor);
+            if (historicalCategory is not null && historicalCategory.Id != category.Id)
+            {
+                historyNote = $" (based on {matchCount} prior transaction(s) at this vendor, overriding the AI's initial guess of '{extracted.Category ?? "(none)"}')";
+                category = historicalCategory;
+            }
+        }
+
         receipt.ExtractedCategoryId = category.Id;
 
         var transaction = new Transaction
@@ -131,7 +145,35 @@ public static class ReceiptOcrSkillFactory
         await db.SaveChangesAsync();
 
         return $"Extracted vendor={extracted.Vendor ?? "(unknown)"}, amount={amount:C}, " +
-               $"date={transaction.OccurredOn:d}, category={category.Name}. Recorded as a transaction.";
+               $"date={transaction.OccurredOn:d}, category={category.Name}{historyNote}. Recorded as a transaction.";
+    }
+
+    /// <summary>
+    /// Finds the most common category among the user's past transactions whose description contains
+    /// <paramref name="vendor"/> (case-insensitive substring — deliberately <c>.ToLower().Contains(...)</c>,
+    /// not <c>EF.Functions.ILike</c>, which is Npgsql-only and would throw against this project's InMemory-
+    /// backed unit tests). Requires at least 2 matches before returning a category at all, so a single past
+    /// mis-categorization can't override anything.
+    /// </summary>
+    private static async Task<(Category? Category, int Count)> FindVendorHistoryCategoryAsync(
+        FinanceDbContext db, Guid userId, string vendor)
+    {
+        var vendorLower = vendor.ToLower();
+
+        var grouped = await db.Transactions
+            .Where(t => t.UserId == userId && t.Description != null && t.Description.ToLower().Contains(vendorLower))
+            .GroupBy(t => t.CategoryId)
+            .Select(g => new { CategoryId = g.Key, Count = g.Count() })
+            .OrderByDescending(g => g.Count)
+            .FirstOrDefaultAsync();
+
+        if (grouped is null || grouped.Count < 2)
+        {
+            return (null, 0);
+        }
+
+        var category = await db.Categories.FirstOrDefaultAsync(c => c.Id == grouped.CategoryId);
+        return (category, grouped.Count);
     }
 
     private const string ExtractionPrompt = """
