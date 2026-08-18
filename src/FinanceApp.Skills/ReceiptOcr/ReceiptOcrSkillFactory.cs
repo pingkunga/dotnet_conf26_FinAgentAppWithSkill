@@ -131,7 +131,8 @@ public static class ReceiptOcrSkillFactory
             UserId = userId,
             CategoryId = category.Id,
             Amount = amount,
-            OccurredOn = extracted.Date ?? DateOnly.FromDateTime(DateTime.UtcNow),
+
+            OccurredOn = extracted.Date ?? DateOnly.FromDateTime(DateTime.Now),
             Description = extracted.Vendor,
             Source = TransactionSource.ReceiptOcr,
             ReceiptId = receipt.Id,

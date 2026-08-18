@@ -421,7 +421,8 @@
         }
 
         var receipt = await Db.Receipts.FirstAsync(r => r.Id == currentReceipt.Id);
-        var occurredOn = manualDate is null ? DateOnly.FromDateTime(DateTime.UtcNow) : DateOnly.FromDateTime(manualDate.Value);
+        // Local time, not UtcNow — matches Budgets.razor/Transactions.razor's "today" convention.
+        var occurredOn = manualDate is null ? DateOnly.FromDateTime(DateTime.Now) : DateOnly.FromDateTime(manualDate.Value);
         var vendor = string.IsNullOrWhiteSpace(manualVendor) ? null : manualVendor;
 
         if (receipt.ResultingTransactionId is { } transactionId)

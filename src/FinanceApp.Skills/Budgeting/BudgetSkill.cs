@@ -287,7 +287,8 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
     private static DateOnly ParseDateOrToday(string? isoDate) =>
         isoDate is not null && DateOnly.TryParse(isoDate, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
-            : DateOnly.FromDateTime(DateTime.UtcNow);
+
+            : DateOnly.FromDateTime(DateTime.Now);
 
     private static DateOnly NormalizeToMonthStart(DateOnly date) => new(date.Year, date.Month, 1);
 }
