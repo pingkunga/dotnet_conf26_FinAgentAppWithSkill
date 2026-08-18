@@ -88,7 +88,7 @@ the hard "agent/skill calls must never leak across users" isolation rule.
 - **Transaction** — `Id, UserId, CategoryId?, Amount(decimal 18,2), Currency, OccurredOn, Description, Source(Manual/Agent/ReceiptOcr), ReceiptId?, CreatedAtUtc`
 - **Budget** — `Id, UserId, CategoryId, PeriodMonth, LimitAmount` — unique index `(UserId, CategoryId, PeriodMonth)`
 - **SavingsGoal** — `Id, UserId, Name, TargetAmount, CurrentAmount, TargetDate?, MonthlyContribution?, CreatedAtUtc`
-- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Unsupported), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ResultingTransactionId?`
+- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Manual), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ResultingTransactionId?`
 
 Design choices: receipt images stored as `bytea` directly in Postgres (no object storage needed at this
 scale); **monthly summaries are computed on the fly, not persisted** (cheap aggregation, avoids a
@@ -279,11 +279,30 @@ response back). Findings, favorable — **no per-provider fallback needed**:
   (`ChatOptions` being `Microsoft.Extensions.AI.ChatOptions`) instead; confirmed it round-trips to
   `AIAgent.Instructions` after construction.
 
+**Superseded 2026-08-16** by the approval-toggle work: `AgentFactory.CreateAgent` now builds via
+`Microsoft.Agents.AI.Harness`'s `chatClient.AsHarnessAgent(HarnessAgentOptions, loggerFactory)` instead of
+`AsAIAgent(ChatClientAgentOptions, ...)` — `HarnessAgent : DelegatingAIAgent : AIAgent`, so the return type
+and every finding above (`AIContextProviders` accepting the `AgentSkillsProvider` directly, instructions via
+`ChatOptions.Instructions` rather than a top-level property) still hold unchanged; only the options type
+changed. Every `HarnessAgentOptions` capability besides Tool Approval (`ToolApprovalAgentOptions`) and this
+app's own skills (still `AIContextProviders`, **not** `HarnessAgentOptions.AgentSkillsSource` — that's a
+single raw `AgentSkillsSource`, a different type from this app's composite `AgentSkillsProvider`) is
+explicitly disabled (`DisableCompaction`/`DisableFileMemory`/`DisableWebSearch`/`DisableTodoProvider`/
+`DisableAgentModeProvider`/`DisableAgentSkillsProvider`/`DisableOpenTelemetry = true`), keeping the running
+feature set identical to the pre-Harness design. Confirmed via a real streaming round-trip spike (not just
+XML docs) that the stream still surfaces `FunctionCallContent`/`ToolApprovalRequestContent` in the same
+shape `SkillActivityExtractor`/`Chat.razor` already parse, that `AutoApprovalRules` is actually evaluated,
+that resuming after approval still works, and — the highest-risk untested surface — that a skill registered
+mid-session into a dynamic `AgentSkillsSource` (receipt-OCR, §4.2) is still discoverable on the next turn.
+One build-time gotcha: `HarnessAgentOptions` ships marked `[Experimental("MAAI001")]` in package 1.17.0
+despite Harness itself being announced GA — constructing it is a compile *error* without a narrowly-scoped
+`#pragma warning disable MAAI001` around the construction (see `AgentFactory.cs`'s remarks).
+
 `src/FinanceApp.AI/IAgentFactory.cs` + `AgentFactory.cs` are implemented (the single seam allowed to
 construct an `AIAgent`):
 ```csharp
 public interface IAgentFactory {
-    AIAgent CreateAgent(AgentSkillsProvider skillsProvider, string? instructions = null);
+    AIAgent CreateAgent(AgentSkillsProvider skillsProvider, string? instructions = null, ToolApprovalAgentOptions? toolApprovalOptions = null);
 }
 ```
 Since construction is now confirmed universal, the originally-planned graceful-degradation fallback ("log a
@@ -407,9 +426,19 @@ discovery loses its cache too and re-scans disk every turn instead of once — t
 **Disambiguating multiple pending receipts**: each upload gets its own skill, named
 `receipt-ocr-{receiptId:N}`, with an identical description across all of them (from
 `ReceiptOcrSkillFactory.Create`) — if more than one receipt is `Pending` in the same session, the model has
-no way to tell them apart from the skill list alone. `Chat.razor`'s pre-filled prompt (below) names the
-exact skill, not just "the receipt I uploaded", to remove that ambiguity structurally rather than relying
-on the model guessing right.
+no way to tell them apart from the skill list alone. `ReceiptUpload.razor`'s inline extraction message
+(below) names the exact skill, not just "the receipt I uploaded", to remove that ambiguity structurally
+rather than relying on the model guessing right.
+
+**Inline extraction, no `/Chat` handoff (redesigned 2026-08-17)**: "Extract with AI" originally navigated
+to `/Chat?receiptId={id}` (see the now-superseded §7 paragraph history) — reworked so the whole
+`load_skill`/`run_skill_script`/approval round trip runs and renders directly on `/Receipts`, driving the
+same `ChatSessionService.SendAsync`/`ResumeWithApprovalAsync` stream `Chat.razor` uses (the service is
+scoped per Blazor circuit, so both pages already share one `AIAgent`/`AgentSession` — no new backend
+mechanism, only `ReceiptUpload.razor`'s own drain/approval-card UI, mirroring `Chat.razor`'s). Rationale:
+uploading a receipt is a single-purpose task that should resolve on the page it started on, not hand off to
+a general chat surface — the activity-log/approval-card visibility that motivated the original `/Chat`
+handoff is preserved (both are rendered inline now), just without leaving the page.
 
 **Extraction/category logic**: the multimodal prompt asks for `{"vendor", "amount", "date", "category"}` as
 a single JSON object; parsing is deliberately tolerant (`TryParseExtraction`) — a missing/malformed field
@@ -448,17 +477,22 @@ stdout/stderr. `savings-goals` avoids `scripts/` because it has nothing to compu
 doesn't exist — `savings-calculator` uses it directly and accepts the resulting Python/interpreter runtime
 dependency.
 
-**Trust boundary, not Harness**: a `Microsoft.Agents.AI.Harness` 1.17.0 spike (reflection + live checks,
-prompted by a "should built-in skills be allowed to run scripts while a hypothetical user-uploaded skill
-never should" question) confirmed `HarnessAgent`'s `ToolApprovalAgentOptions.AutoApprovalRules` is a real
-per-call gate, but only a gate — it decides whether to prompt, not what a script can touch, and anything
-not auto-approved stalls the stream on a `ToolApprovalRequestContent` this app has no UI to resolve (the
-same stall found building `Chat.razor`, §7 below). The policy doesn't need Harness: each
-`.UseFileSkill(...)` registration in `ChatSessionService` already takes its own runner delegate, so
-`savings-goals` gets one that always throws and `savings-calculator` gets `SubprocessScriptRunner.RunAsync`
-directly — trust is structural per registration, no shared gate required. If a future user-upload feature
-ever registers many dynamic paths through one runner instead of two static ones, `AgentFileSkill.Path` (the
-real on-disk directory, not attacker-controllable via an uploaded `SKILL.md`) is the mechanism to check
+**Trust boundary, then later superseded by the approval-toggle work (§3.3)**: an earlier
+`Microsoft.Agents.AI.Harness` 1.17.0 spike (prompted by a "should built-in skills be allowed to run scripts
+while a hypothetical user-uploaded skill never should" question) found `ToolApprovalAgentOptions.
+AutoApprovalRules` is a real per-call gate, but concluded at the time that anything not auto-approved would
+stall the stream on a `ToolApprovalRequestContent` this app had no UI to resolve, so the policy stayed
+structural (`savings-goals`'s runner always throws, `savings-calculator` gets `SubprocessScriptRunner.
+RunAsync` directly — trust per registration, no shared gate). **That conclusion no longer holds**: the
+approval-toggle work (2026-08-16) added exactly that missing UI (`Chat.razor`'s Approve/Reject cards, §7)
+plus a real per-action-kind gate (`SkillApprovalPolicy`/`SkillActionClassifier`,
+`AutoApproveWrites`/`AutoApproveExecuteScript` on `ApplicationUser`) — `savings-calculator`'s script is now
+actually gated behind `AutoApproveExecuteScript` when a user turns it off, and `AgentFactory` now builds via
+`AsHarnessAgent` (§3.3). The structural trust boundary (which runner a `.UseFileSkill(...)` registration
+gets) still matters independently — it's what stops an approved script from running *anything other than*
+its own registered interpreter — but it's no longer the *only* gate. If a future user-upload feature ever
+registers many dynamic paths through one runner instead of two static ones, `AgentFileSkill.Path` (the real
+on-disk directory, not attacker-controllable via an uploaded `SKILL.md`) is still the mechanism to check
 against a trusted-root allowlist — not built, just the reach-for-this-when-needed note.
 
 **Two more gotchas found only by live spikes, not documented anywhere upstream**:
@@ -830,34 +864,55 @@ circuit-connect behavior is unverified, not a claim of "confirmed working" based
   `HasQueryFilter(g => g.UserId == _currentUserId)` is what actually enforces isolation (a hand-edited guid
   for someone else's goal just resolves to nothing) rather than any new logic on this page. Pre-fills
   `Chat.razor`'s input; does not auto-send (see below).
-- **`ReceiptUpload.razor`** (routed `/Receipts`) — **implemented 2026-08-12.** `InputFile` with an
-  **explicit, generous `maxAllowedSize`** override (10 MB — Blazor's default `OpenReadStream` cap is
-  512 KB and will throw/truncate without this), image preview, a table of the user's past receipts with
-  status. On upload: saves the `Receipt` row, then calls
-  `ChatSessionService.RegisterReceiptSkill(receiptId)` (§4.2) so the receipt-OCR skill exists before the
-  user ever navigates to `Chat.razor`. "Extract with AI" button — disabled with explanatory text when
-  `AiOptions.SupportsVision` is false — navigates to `/Chat?receiptId={id}` (same handoff shape as
-  `Goals.razor`'s `?goalId=`). When vision isn't supported, manual entry fields (vendor/amount/category)
-  are shown instead, submitted as a plain `Transaction` write with `Source = Manual` and
-  `Receipt.OcrStatus = Unsupported` — no agent involved, matching `Transactions.razor`'s precedent.
-- **`Chat.razor`** — **implemented 2026-08-11, extended 2026-08-12 for receipt handoff, 2026-08-13 for
-  Markdig rendering**, the demo centerpiece: freeform chat wired to `ChatSessionService` (builds one
-  `AIAgent` + one `AgentSession` per Blazor circuit — all 4 skill sources are wired now: `BudgetSkill`
-  (§4.1), the `savings-goals`/`savings-calculator` file skills (§4.3), dynamically-registered receipt-OCR
-  skills (§4.2), and the MCP-based monthly-summary skill when the per-session server starts successfully
-  (§4.4)), streams the response, and renders an **`AgentActivityLog`** side panel via
-  `FinanceApp.AI.SkillActivityExtractor`. Assistant messages render as sanitized Markdown (`Markdig`,
-  `.UseAdvancedExtensions().DisableHtml()` — the latter is load-bearing: a spike found raw HTML in a
-  response passes through unescaped without it, a real XSS path since this renders LLM-generated,
-  potentially prompt-injected text); user input stays plain text. Also accepts `?goalId=<guid>` from
-  `Goals.razor`'s handoff and
-  `?receiptId=<guid>` from `ReceiptUpload.razor`'s (above) via `[SupplyParameterFromQuery]`, read in
-  `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real
-  goal/receipt — deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page
-  with prerendering and there's no LLM available in this environment to verify an auto-sent round trip
-  against. The receipt prompt names the exact dynamically-registered skill (`receipt-ocr-{id:N}`), not just
-  "the receipt I uploaded" — necessary because every such skill shares the same description, so if more
-  than one receipt is pending in the same session only the exact name disambiguates which one to load.
+- **`ReceiptUpload.razor`** (routed `/Receipts`) — **implemented 2026-08-12, redesigned 2026-08-17 for
+  inline extraction + Edit/Delete.** `InputFile` with an **explicit, generous `maxAllowedSize`** override
+  (10 MB — Blazor's default `OpenReadStream` cap is 512 KB and will throw/truncate without this), image
+  preview, a table of the user's past receipts with status/vendor/amount/category. On upload: saves the
+  `Receipt` row, then calls `ChatSessionService.RegisterReceiptSkill(receiptId)` (§4.2) so the receipt-OCR
+  skill exists before extraction is ever triggered.
+  - **"Extract with AI"** — shown whenever the selected receipt's `OcrStatus` is still `Pending` and
+    `AiOptions.SupportsVision` is true (not only right after upload — clicking **Edit** on an old still-
+    `Pending` row surfaces it too). Runs **inline on this page** — no more navigating to `/Chat` (see §4.2's
+    "Inline extraction, no `/Chat` handoff" note): drives `ChatSessionService.SendAsync`/
+    `ResumeWithApprovalAsync` directly, rendering a streaming indicator, an `AgentActivityLog` panel, an
+    Approve/Reject card per pending `ToolApprovalRequestContent` (same markup `Chat.razor` uses), and the
+    final result text, all in place. Once the stream settles, the page re-queries the `Receipt`
+    (`AsNoTracking`, since the skill script wrote it through a *different* `FinanceDbContext` instance —
+    `ReceiptOcrSkillFactory.CreateDbContext` — so this page's own tracked/cached copy would otherwise be
+    stale) and refreshes the table.
+  - **Edit / Delete** — every row now has both. Edit reuses the (now-unconditional, previously
+    no-vision-only) manual-fields form: vendor/amount/category/**date** (new field), pre-filled from the
+    receipt's `Extracted*` columns; Save either updates the already-linked `Transaction` in place (status
+    unchanged — a human correcting one field of an AI-`Succeeded` extraction doesn't retroactively make it
+    "not AI's doing") or, if none exists yet, creates one and sets `OcrStatus = Manual` (same semantics
+    the original no-vision-only manual entry had). Delete removes only the `Receipt` row; `Transaction.
+    ReceiptId` is `DeleteBehavior.SetNull` (§2a), so a resulting `Transaction` is detached, not deleted —
+    intentional, matches the existing schema's own intent that a receipt is source material, not the
+    financial record itself. Neither action has a confirmation dialog, matching `Transactions.razor`/
+    `Goals.razor`'s existing convention.
+  - **Known limitation, not solved this pass**: `ChatSessionService`'s `AIAgent`/`AgentSession` is one
+    instance per Blazor circuit, shared by both `/Receipts` and `/Chat`. Starting an extraction here and
+    leaving its approval card unresolved, then sending a message from `/Chat`, leaves that outstanding
+    tool-approval turn in an untested state — narrow edge case, same spirit as this project's other small
+    accepted gaps (mid-session Profile-preference changes; MudSwitch's unverified checkbox-posting
+    behavior).
+- **`Chat.razor`** — **implemented 2026-08-11, extended 2026-08-12 for receipt handoff (removed
+  2026-08-17 — see `ReceiptUpload.razor` above), 2026-08-13 for Markdig rendering**, the demo centerpiece:
+  freeform chat wired to `ChatSessionService` (builds one `AIAgent` + one `AgentSession` per Blazor
+  circuit — all 4 skill sources are wired now: `BudgetSkill` (§4.1), the
+  `savings-goals`/`savings-calculator` file skills (§4.3), dynamically-registered receipt-OCR skills
+  (§4.2, joinable mid-conversation even though this page itself no longer triggers one directly), and the
+  MCP-based monthly-summary skill when the per-session server starts successfully (§4.4)), streams the
+  response, and renders an **`AgentActivityLog`** side panel via `FinanceApp.AI.SkillActivityExtractor`.
+  Assistant messages render as sanitized Markdown (`Markdig`, `.UseAdvancedExtensions().DisableHtml()` —
+  the latter is load-bearing: a spike found raw HTML in a response passes through unescaped without it, a
+  real XSS path since this renders LLM-generated, potentially prompt-injected text); user input stays plain
+  text. Still accepts `?goalId=<guid>` from `Goals.razor`'s handoff via `[SupplyParameterFromQuery]`, read
+  in `OnInitializedAsync` to pre-fill (not auto-send) the input box with a prompt built from the real goal —
+  deliberately not auto-sent, since `OnInitializedAsync` can run twice on an interactive page with
+  prerendering and there's no LLM available in this environment to verify an auto-sent round trip against.
+  (The equivalent `?receiptId=<guid>` handoff no longer exists — receipt extraction is entirely
+  `ReceiptUpload.razor`'s concern now.)
 
   **Markdown rendering (added 2026-08-12)**: assistant messages render through
   [Markdig](https://github.com/xoofx/markdig) (`Markdown.ToHtml(text, pipeline)` → `MarkupString`) so
