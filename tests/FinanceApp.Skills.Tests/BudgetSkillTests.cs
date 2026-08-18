@@ -91,6 +91,87 @@ public sealed class BudgetSkillTests
     }
 
     [Fact]
+    public async Task TransferBudget_MovesLimitBetweenCategories_CreatingTheDestinationIfMissing()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        await skill.SetBudgetAsync("Groceries", 1000m, "2026-08-01");
+
+        var result = await skill.TransferBudgetAsync("Groceries", "Dining", 300m, "2026-08-01");
+
+        Assert.Contains("Transferred", result);
+        var status = await skill.CheckBudgetStatusAsync("2026-08-01");
+        Assert.Contains($"Groceries: {0m:C} / {700m:C}", status);
+        Assert.Contains($"Dining: {0m:C} / {300m:C}", status);
+    }
+
+    [Fact]
+    public async Task TransferBudget_AddsToAnExistingDestinationBudget_RatherThanOverwritingIt()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        await skill.SetBudgetAsync("Groceries", 1000m, "2026-08-01");
+        await skill.SetBudgetAsync("Dining", 200m, "2026-08-01");
+
+        await skill.TransferBudgetAsync("Groceries", "Dining", 300m, "2026-08-01");
+
+        var status = await skill.CheckBudgetStatusAsync("2026-08-01");
+        Assert.Contains($"Dining: {0m:C} / {500m:C}", status);
+    }
+
+    [Fact]
+    public async Task TransferBudget_InsufficientFunds_WritesNothingAndReportsWhatsActuallyAvailable()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        await skill.SetBudgetAsync("Groceries", 500m, "2026-08-01");
+        await skill.SetBudgetAsync("Dining", 200m, "2026-08-01");
+
+        var result = await skill.TransferBudgetAsync("Groceries", "Dining", 1500m, "2026-08-01");
+
+        Assert.Contains("Cannot transfer", result);
+        Assert.Contains($"{500m:C}", result);
+
+        // Neither budget row changed — the important negative case.
+        var status = await skill.CheckBudgetStatusAsync("2026-08-01");
+        Assert.Contains($"Groceries: {0m:C} / {500m:C}", status);
+        Assert.Contains($"Dining: {0m:C} / {200m:C}", status);
+    }
+
+    [Fact]
+    public async Task TransferBudget_InsufficientFunds_SuggestsAlternativeCategoriesWithEnoughHeadroom()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        await skill.SetBudgetAsync("Groceries", 500m, "2026-08-01");
+        await skill.SetBudgetAsync("Entertainment", 800m, "2026-08-01"); // enough headroom
+        await skill.SetBudgetAsync("Transport", 650m, "2026-08-01"); // enough headroom, less than Entertainment
+        await skill.SetBudgetAsync("Utilities", 100m, "2026-08-01"); // not enough — should be excluded
+
+        var result = await skill.TransferBudgetAsync("Groceries", "Dining", 600m, "2026-08-01");
+
+        Assert.Contains($"Entertainment ({800m:C})", result);
+        Assert.Contains($"Transport ({650m:C})", result);
+        Assert.DoesNotContain("Utilities", result);
+    }
+
+    [Fact]
+    public async Task TransferBudget_UnknownCategory_ReturnsErrorWithoutWriting()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+        await skill.SetBudgetAsync("Groceries", 500m, "2026-08-01");
+
+        var result = await skill.TransferBudgetAsync("Groceries", "NoSuchCategory", 100m, "2026-08-01");
+
+        Assert.StartsWith("Error:", result);
+    }
+
+    [Fact]
     public async Task CrossUserIsolation_OneUsersSkillNeverSeesAnotherUsersTransactions()
     {
         var dbName = Guid.NewGuid().ToString();

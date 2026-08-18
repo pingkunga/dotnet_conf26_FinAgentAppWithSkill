@@ -40,6 +40,13 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         - add_transaction: record a new expense or income.
         - list_transactions: show recent transactions, optionally filtered by date range or category.
         - set_budget: set or update a monthly spending limit for a category.
+        - transfer_budget: move budget headroom from one category to another within the same month. Prefer
+          this over two separate set_budget calls whenever the user asks to reallocate/move budget between
+          categories — it's atomic and gives them one thing to review instead of two. Call check_budget_status
+          first so you propose a source category that's actually likely to have enough headroom. If it still
+          reports insufficient funds, don't retry blindly or guess a smaller amount yourself — turn its
+          response (which lists alternative categories with headroom, if any) into a clarifying question for
+          the user: proceed with a suggested category, a smaller amount, or skip the transfer.
         - check_budget_status: report spend-vs-limit per category for a month, flagging Near (>=80% used)
           and Over (>100% used) categories. Read the budgeting-policy resource for how to phrase advice
           about Near/Over categories.
@@ -169,6 +176,86 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         await db.SaveChangesAsync();
 
         return $"Set {category.Name} budget for {period:yyyy-MM} to {limitAmount:C}.";
+    }
+
+    /// <summary>
+    /// Moves budget headroom from one category to another within the same month, atomically (one
+    /// <see cref="FinanceDbContext.SaveChangesAsync(CancellationToken)"/> covers both rows — EF Core's
+    /// default per-call transaction is what gives this the atomicity two separate <c>set_budget</c> calls
+    /// would lack). Writes nothing at all if the source doesn't have enough headroom — instead of silently
+    /// under-transferring or guessing, returns the shortfall plus up to 2 alternative categories that do
+    /// have enough (deterministic, computed here rather than hoping the model calls <c>check_budget_status</c>
+    /// first — see <see cref="Instructions"/> for the companion behavior that asks it to anyway).
+    /// </summary>
+    [AgentSkillScript("transfer_budget")]
+    public async Task<string> TransferBudgetAsync(string fromCategoryName, string toCategoryName, decimal amount, string? periodMonth)
+    {
+        using var scope = scopeFactory.CreateScope();
+        await using var db = CreateDbContext(scope.ServiceProvider);
+
+        var fromCategory = await FindCategoryAsync(db, fromCategoryName);
+        if (fromCategory is null)
+        {
+            return $"Error: no category named '{fromCategoryName}' found.";
+        }
+
+        var toCategory = await FindCategoryAsync(db, toCategoryName);
+        if (toCategory is null)
+        {
+            return $"Error: no category named '{toCategoryName}' found.";
+        }
+
+        var period = NormalizeToMonthStart(ParseDateOrToday(periodMonth));
+
+        var fromBudget = await db.Budgets.FirstOrDefaultAsync(b =>
+            b.UserId == userId && b.CategoryId == fromCategory.Id && b.PeriodMonth == period);
+
+        if (fromBudget is null || fromBudget.LimitAmount < amount)
+        {
+            var available = fromBudget?.LimitAmount ?? 0m;
+
+            var alternatives = await db.Budgets
+                .Include(b => b.Category)
+                .Where(b => b.UserId == userId && b.PeriodMonth == period
+                    && b.CategoryId != fromCategory.Id && b.LimitAmount >= amount)
+                .OrderByDescending(b => b.LimitAmount)
+                .Take(2)
+                .ToListAsync();
+
+            var suggestion = alternatives.Count > 0
+                ? " Categories with enough headroom instead: " +
+                  string.Join(", ", alternatives.Select(b => $"{b.Category.Name} ({b.LimitAmount:C})")) + "."
+                : "";
+
+            return $"Cannot transfer {amount:C} from {fromCategory.Name} for {period:yyyy-MM} — only " +
+                   $"{available:C} available.{suggestion} Ask the user how they'd like to proceed.";
+        }
+
+        var toBudget = await db.Budgets.FirstOrDefaultAsync(b =>
+            b.UserId == userId && b.CategoryId == toCategory.Id && b.PeriodMonth == period);
+
+        fromBudget.LimitAmount -= amount;
+        if (toBudget is null)
+        {
+            toBudget = new Budget
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                CategoryId = toCategory.Id,
+                PeriodMonth = period,
+                LimitAmount = amount,
+            };
+            db.Budgets.Add(toBudget);
+        }
+        else
+        {
+            toBudget.LimitAmount += amount;
+        }
+
+        await db.SaveChangesAsync();
+
+        return $"Transferred {amount:C} from {fromCategory.Name} to {toCategory.Name} for {period:yyyy-MM}. " +
+               $"{fromCategory.Name} is now {fromBudget.LimitAmount:C}, {toCategory.Name} is now {toBudget.LimitAmount:C}.";
     }
 
     [AgentSkillScript("check_budget_status")]
