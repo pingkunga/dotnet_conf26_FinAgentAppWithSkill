@@ -78,6 +78,19 @@ public sealed class SubprocessScriptRunnerTests
         }
     }
 
+    [Fact]
+    public async Task RunAsync_DiscoversProjectDebtPayoffScript()
+    {
+        // Proves the new sibling script is present, correctly named (frontmatter/folder match, per the
+        // discovery gotcha documented above), and discoverable through the real file-skill pipeline —
+        // same "prove it's reachable" bar as project-savings.py's own coverage, no real python3 invocation.
+        var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills", "savings-calculator");
+        var (skill, script) = await DiscoverScriptAsync(skillsRoot, "scripts/project-debt-payoff.py");
+
+        Assert.Equal("savings-calculator", skill.Frontmatter.Name);
+        Assert.Equal("scripts/project-debt-payoff.py", script.Name);
+    }
+
     private static async Task<(AgentFileSkill Skill, AgentFileSkillScript Script)> DiscoverProjectSavingsScriptAsync()
     {
         var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills", "savings-calculator");
