@@ -14,4 +14,5 @@ public static class SeedData
     public static readonly Guid EntertainmentCategoryId = new("00000000-0000-0000-0000-000000000105");
     public static readonly Guid IncomeCategoryId = new("00000000-0000-0000-0000-000000000106");
     public static readonly Guid OtherCategoryId = new("00000000-0000-0000-0000-000000000107");
+    public static readonly Guid SavingsCategoryId = new("00000000-0000-0000-0000-000000000108");
 }

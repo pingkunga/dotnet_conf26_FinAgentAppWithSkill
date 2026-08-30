@@ -13,18 +13,22 @@ public class SkillActionClassifierTests
 {
     [Theory]
     [InlineData("budgeting", "add_transaction")]
+    [InlineData("budgeting", "top_up_funds")]
     [InlineData("budgeting", "set_budget")]
     [InlineData("budgeting", "transfer_budget")]
+    [InlineData("budgeting", "contribute_to_goal")]
     public void Classify_BudgetingWriteScripts_AreWrite(string skillName, string scriptName)
     {
         Assert.Equal(SkillActionKind.Write, SkillActionClassifier.Classify(skillName, scriptName));
     }
 
-    [Fact]
-    public void Classify_SavingsCalculatorScript_IsExecuteScript()
+    [Theory]
+    [InlineData("scripts/project-savings.py")]
+    [InlineData("scripts/project-debt-payoff.py")]
+    public void Classify_SavingsCalculatorScript_IsExecuteScript(string scriptName)
     {
         Assert.Equal(SkillActionKind.ExecuteScript,
-            SkillActionClassifier.Classify("savings-calculator", "scripts/project-savings.py"));
+            SkillActionClassifier.Classify("savings-calculator", scriptName));
     }
 
     [Fact]

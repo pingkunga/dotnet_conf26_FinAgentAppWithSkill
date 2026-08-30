@@ -1,5 +1,6 @@
 using FinanceApp.Core;
 using FinanceApp.Core.Abstractions;
+using FinanceApp.Core.Entities;
 using FinanceApp.Skills.Budgeting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -194,5 +195,117 @@ public sealed class BudgetSkillTests
         Assert.DoesNotContain("999", userBListing);
         Assert.DoesNotContain("secret", userBListing);
         Assert.Equal("No transactions found for that filter.", userBListing);
+    }
+
+    [Fact]
+    public async Task TopUpFunds_CreatesIncomeTransaction()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.TopUpFundsAsync(1500m, "Salary", "2026-08-01");
+
+        Assert.Contains("Topped up", result);
+        await using var db = await OpenSeedDbAsync(dbName, userId);
+        var transaction = await db.Transactions.SingleAsync();
+        Assert.Equal(SeedData.IncomeCategoryId, transaction.CategoryId);
+        Assert.Equal(1500m, transaction.Amount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-10)]
+    public async Task TopUpFunds_ZeroOrNegativeAmount_ReturnsErrorAndWritesNothing(decimal amount)
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.TopUpFundsAsync(amount, null, null);
+
+        Assert.StartsWith("Error:", result);
+        await using var db = await OpenSeedDbAsync(dbName, userId);
+        Assert.Empty(db.Transactions);
+    }
+
+    private static async Task<Guid> SeedGoalAsync(string dbName, Guid userId, string name, decimal targetAmount, decimal currentAmount = 0m)
+    {
+        await using var db = await OpenSeedDbAsync(dbName, userId);
+        var goal = new SavingsGoal
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Name = name,
+            TargetAmount = targetAmount,
+            CurrentAmount = currentAmount,
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        db.SavingsGoals.Add(goal);
+        await db.SaveChangesAsync();
+        return goal.Id;
+    }
+
+    [Fact]
+    public async Task ContributeToGoal_IncrementsCurrentAmount_AndCreatesTransaction()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId); // ensures categories exist
+        await SeedGoalAsync(dbName, userId, "Emergency Fund", 10000m, currentAmount: 1000m);
+
+        var result = await skill.ContributeToGoalAsync("Emergency Fund", 250m, "2026-08-01");
+
+        Assert.Contains("Added", result);
+        await using var db = await OpenSeedDbAsync(dbName, userId);
+        var goal = await db.SavingsGoals.SingleAsync();
+        Assert.Equal(1250m, goal.CurrentAmount);
+        var transaction = await db.Transactions.SingleAsync();
+        Assert.Equal(SeedData.SavingsCategoryId, transaction.CategoryId);
+        Assert.Equal(250m, transaction.Amount);
+    }
+
+    [Fact]
+    public async Task ContributeToGoal_UnknownGoalName_ReturnsError()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.ContributeToGoalAsync("No Such Goal", 100m, null);
+
+        Assert.StartsWith("Error:", result);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-50)]
+    public async Task ContributeToGoal_ZeroOrNegativeAmount_LeavesCurrentAmountAndTransactionsUntouched(decimal amount)
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+        await SeedGoalAsync(dbName, userId, "Car", 5000m, currentAmount: 500m);
+
+        var result = await skill.ContributeToGoalAsync("Car", amount, null);
+
+        Assert.StartsWith("Error:", result);
+        await using var db = await OpenSeedDbAsync(dbName, userId);
+        var goal = await db.SavingsGoals.SingleAsync();
+        Assert.Equal(500m, goal.CurrentAmount);
+        Assert.Empty(db.Transactions);
+    }
+
+    [Fact]
+    public async Task ContributeToGoal_CrossUserIsolation_UserBNamingUserAsGoal_ReturnsError()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userA = Guid.NewGuid();
+        var userB = Guid.NewGuid();
+
+        await using (var _ = await OpenSeedDbAsync(dbName, userId: null)) { } // seed global categories
+        await SeedGoalAsync(dbName, userA, "User A's Goal", 1000m);
+
+        var skillB = new BudgetSkill(BuildScopeFactory(dbName), userB);
+        var result = await skillB.ContributeToGoalAsync("User A's Goal", 100m, null);
+
+        Assert.StartsWith("Error:", result);
+        await using var db = await OpenSeedDbAsync(dbName, userId: null);
+        Assert.Empty(db.Transactions);
     }
 }

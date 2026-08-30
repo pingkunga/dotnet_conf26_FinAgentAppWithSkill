@@ -31,15 +31,21 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 {
     public override AgentSkillFrontmatter Frontmatter { get; } = new(
         name: "budgeting",
-        description: "Record transactions, set per-category monthly budgets, and check budget status.",
+        description: "Record transactions, top up funds, set per-category monthly budgets, check budget " +
+                      "status, and contribute to savings goals.",
         compatibility: null);
 
     protected override string Instructions =>
         """
         Use this skill to manage the user's transactions and budgets.
-        - add_transaction: record a new expense or income.
+        - add_transaction: record a new expense or income against any category.
+        - top_up_funds: record income specifically — use this instead of add_transaction whenever the user
+          says they're "topping up", adding funds, or received income, since it always records against the
+          Income category correctly without you having to guess a category name.
         - list_transactions: show recent transactions, optionally filtered by date range or category.
-        - set_budget: set or update a monthly spending limit for a category.
+        - set_budget: set or update a monthly spending limit for a category. If the response notes the
+          month's total allocation now exceeds income, mention that to the user as a heads-up, not a reason
+          to refuse the change.
         - transfer_budget: move budget headroom from one category to another within the same month. Prefer
           this over two separate set_budget calls whenever the user asks to reallocate/move budget between
           categories — it's atomic and gives them one thing to review instead of two. Call check_budget_status
@@ -50,6 +56,9 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         - check_budget_status: report spend-vs-limit per category for a month, flagging Near (>=80% used)
           and Over (>100% used) categories. Read the budgeting-policy resource for how to phrase advice
           about Near/Over categories.
+        - contribute_to_goal: record money put toward a savings goal by name — this records a real
+          transaction and updates the goal's progress atomically. Prefer this over asking the user to edit
+          the goal's "current amount" by hand.
         Dates are ISO 8601 (yyyy-MM-dd). Amounts are positive numbers; category names are matched
         case-insensitively against the user's own categories and the global default set.
         """;
@@ -101,6 +110,47 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         await db.SaveChangesAsync();
 
         return $"Added {amount:C} to {category.Name} on {date:yyyy-MM-dd}.";
+    }
+
+    /// <summary>
+    /// Records income specifically — deliberately does not take a <c>categoryName</c> parameter, always
+    /// resolving the Income category server-side. Taking a model-supplied category name here would reopen
+    /// the exact misrouting risk this Income-lock exists to close.
+    /// </summary>
+    [AgentSkillScript("top_up_funds")]
+    public async Task<string> TopUpFundsAsync(decimal amount, string? description, string? occurredOn)
+    {
+        if (amount <= 0)
+        {
+            return "Error: top-up amount must be greater than zero.";
+        }
+
+        using var scope = scopeFactory.CreateScope();
+        await using var db = CreateDbContext(scope.ServiceProvider);
+
+        var incomeCategory = await db.Categories.FirstOrDefaultAsync(c => c.Id == SeedData.IncomeCategoryId)
+            ?? await db.Categories.FirstOrDefaultAsync(c => c.Kind == CategoryKind.Income);
+        if (incomeCategory is null)
+        {
+            return "Error: no Income category is configured.";
+        }
+
+        var date = ParseDateOrToday(occurredOn);
+
+        db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            CategoryId = incomeCategory.Id,
+            Amount = amount,
+            OccurredOn = date,
+            Description = description,
+            Source = TransactionSource.Agent,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        return $"Topped up {amount:C} on {date:yyyy-MM-dd}.";
     }
 
     [AgentSkillScript("list_transactions")]
@@ -175,7 +225,15 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
         await db.SaveChangesAsync();
 
-        return $"Set {category.Name} budget for {period:yyyy-MM} to {limitAmount:C}.";
+        // Informational only — SetBudgetAsync still writes even when this pushes the month's total
+        // allocation over income (see BudgetRepository.GetAllocationSummaryAsync's own doc comment for why
+        // this is deliberately never a blocking check).
+        var allocation = await BudgetRepository.GetAllocationSummaryAsync(db, userId, period);
+        var overNote = allocation.IsOverAllocated
+            ? $" Note: total allocated for {period:yyyy-MM} now exceeds income by {-allocation.AvailableToAllocate:C}."
+            : "";
+
+        return $"Set {category.Name} budget for {period:yyyy-MM} to {limitAmount:C}.{overNote}";
     }
 
     /// <summary>
@@ -279,6 +337,52 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         });
 
         return string.Join('\n', lines);
+    }
+
+    /// <summary>
+    /// Records a contribution toward a savings goal as a real <see cref="Transaction"/> (Savings category)
+    /// and bumps <see cref="SavingsGoal.CurrentAmount"/> in the same <see cref="FinanceDbContext.SaveChangesAsync(CancellationToken)"/>
+    /// — atomic, same two-write shape as <see cref="TransferBudgetAsync"/>. Goal lookup relies on
+    /// <see cref="FinanceDbContext"/>'s own <c>HasQueryFilter</c> for <see cref="SavingsGoal"/>
+    /// (scoped to <paramref name="userId"/> via the <see cref="FixedCurrentUserAccessor"/> this context was
+    /// constructed with) — a goal name belonging to another user simply isn't found, same structural
+    /// isolation <see cref="FindCategoryAsync"/> already gets for free.
+    /// </summary>
+    [AgentSkillScript("contribute_to_goal")]
+    public async Task<string> ContributeToGoalAsync(string goalName, decimal amount, string? occurredOn)
+    {
+        if (amount <= 0)
+        {
+            return "Error: contribution amount must be greater than zero.";
+        }
+
+        using var scope = scopeFactory.CreateScope();
+        await using var db = CreateDbContext(scope.ServiceProvider);
+
+        var goal = await db.SavingsGoals.FirstOrDefaultAsync(g => g.Name.ToLower() == goalName.ToLower());
+        if (goal is null)
+        {
+            return $"Error: no savings goal named '{goalName}' found.";
+        }
+
+        var date = ParseDateOrToday(occurredOn);
+
+        db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            CategoryId = SeedData.SavingsCategoryId,
+            Amount = amount,
+            OccurredOn = date,
+            Description = $"Contribution to \"{goal.Name}\"",
+            Source = TransactionSource.Agent,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        goal.CurrentAmount += amount;
+
+        await db.SaveChangesAsync();
+
+        return $"Added {amount:C} to \"{goal.Name}\" on {date:yyyy-MM-dd}. New total: {goal.CurrentAmount:C} / {goal.TargetAmount:C}.";
     }
 
     private async Task<Category?> FindCategoryAsync(FinanceDbContext db, string categoryName) =>

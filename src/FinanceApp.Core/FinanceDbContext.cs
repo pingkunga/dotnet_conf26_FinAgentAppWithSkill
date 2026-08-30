@@ -92,7 +92,11 @@ public sealed class FinanceDbContext(
             new Category { Id = SeedData.UtilitiesCategoryId, UserId = null, Name = "Utilities", Kind = CategoryKind.Expense, IsSystemDefault = true },
             new Category { Id = SeedData.EntertainmentCategoryId, UserId = null, Name = "Entertainment", Kind = CategoryKind.Expense, IsSystemDefault = true },
             new Category { Id = SeedData.IncomeCategoryId, UserId = null, Name = "Income", Kind = CategoryKind.Income, IsSystemDefault = true },
-            new Category { Id = SeedData.OtherCategoryId, UserId = null, Name = "Other", Kind = CategoryKind.Expense, IsSystemDefault = true }
+            new Category { Id = SeedData.OtherCategoryId, UserId = null, Name = "Other", Kind = CategoryKind.Expense, IsSystemDefault = true },
+            // Expense, not a "Transfer" kind: a goal contribution genuinely removes money from spendable
+            // funds this month, which keeps MonthlySummaryRepository.TotalExpense and
+            // BudgetRepository.GetAllocationSummaryAsync's AllocatedTotal meaningful with no special-casing.
+            new Category { Id = SeedData.SavingsCategoryId, UserId = null, Name = "Savings", Kind = CategoryKind.Expense, IsSystemDefault = true }
         );
     }
 }

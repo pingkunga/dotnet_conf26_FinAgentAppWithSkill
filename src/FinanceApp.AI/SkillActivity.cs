@@ -113,9 +113,12 @@ public static class SkillActionClassifier
         new Dictionary<(string, string), SkillActionKind>
         {
             [("budgeting", "add_transaction")] = SkillActionKind.Write,
+            [("budgeting", "top_up_funds")] = SkillActionKind.Write,
             [("budgeting", "set_budget")] = SkillActionKind.Write,
             [("budgeting", "transfer_budget")] = SkillActionKind.Write,
+            [("budgeting", "contribute_to_goal")] = SkillActionKind.Write,
             [("savings-calculator", "scripts/project-savings.py")] = SkillActionKind.ExecuteScript,
+            [("savings-calculator", "scripts/project-debt-payoff.py")] = SkillActionKind.ExecuteScript,
         };
 
     public static SkillActionKind Classify(string? skillName, string? scriptName)
