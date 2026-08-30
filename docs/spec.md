@@ -51,7 +51,8 @@ MyFinanceWithAgentSkill/
 │   │   └── references/{compound-interest.md, fifty-thirty-twenty.md}
 │   └── savings-calculator/            # script-backed exact math (§4.3)
 │       ├── SKILL.md
-│       └── scripts/project-savings.py
+│       ├── references/formula.md
+│       └── scripts/{project-savings.py, project-debt-payoff.py}
 ├── src/
 │   ├── FinanceApp.Core/               # domain entities + EF Core DbContext + repositories (shared by Web & McpServer)
 │   ├── FinanceApp.AI/                 # ChatClientFactory + AgentFactory (isolated LLM-provider risk boundary)
@@ -88,7 +89,7 @@ the hard "agent/skill calls must never leak across users" isolation rule.
 - **Transaction** — `Id, UserId, CategoryId?, Amount(decimal 18,2), Currency, OccurredOn, Description, Source(Manual/Agent/ReceiptOcr), ReceiptId?, CreatedAtUtc`
 - **Budget** — `Id, UserId, CategoryId, PeriodMonth, LimitAmount` — unique index `(UserId, CategoryId, PeriodMonth)`
 - **SavingsGoal** — `Id, UserId, Name, TargetAmount, CurrentAmount, TargetDate?, MonthlyContribution?, CreatedAtUtc`
-- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Manual), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ResultingTransactionId?`
+w- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Manual), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ResultingTransactionId?`
 
 Design choices: receipt images stored as `bytea` directly in Postgres (no object storage needed at this
 scale); **monthly summaries are computed on the fly, not persisted** (cheap aggregation, avoids a
@@ -410,6 +411,16 @@ implementation time" item, now closed)**:
   `ReceiptOcrSkillFactoryTests` does) returns the result **JSON-serialized as a `JsonElement`**, not the
   raw C# value the delegate returned — found because a test asserting `IsType<string>` failed and had to
   be corrected to unwrap `JsonElement.GetString()` instead.
+- **Extended 2026-08-30** with a dynamic resource (`AddResource(name, Delegate, description,
+  serializerOptions)` — a second `AgentInlineSkill` overload, distinct from the static `AddResource(name,
+  object value, description)` form): `receipt_status`, reading the receipt's current status/extracted
+  fields without re-running OCR. Confirmed via reflection against the pinned assembly: the delegate's
+  parameters/return type are marshaled the same way `AddScript`'s are (a zero-arg `async Task<string> ()`
+  works identically); `AgentSkill.GetResourceAsync(name, ct)` returns an `AgentSkillResource` exposing
+  `ReadAsync(IServiceProvider, CancellationToken)` — the read-side counterpart to `AgentSkillScript.
+  RunAsync`, minus an `arguments` parameter since a resource takes no LLM-supplied input. Payoff:
+  `read_skill_resource` is never approval-gated (unlike `extract_receipt`, which is `Write`-classified), so
+  a status question no longer costs an unnecessary approval round-trip.
 
 **Dynamic mid-session skill registration** — the real design problem this skill exposed: it must be built
 *after* `ChatSessionService`'s agent/session already exist (one receipt upload can happen well into an
@@ -462,7 +473,13 @@ file-based mechanism (this app's whole point is showing off Agent Framework Skil
   this skill is static reference content with nothing to compute.
 - `skills/savings-calculator/SKILL.md` plus `scripts/project-savings.py`, a deterministic
   monthly-compounding projector — the instructions tell the agent to call the script for any exact number
-  instead of estimating the math itself.
+  instead of estimating the math itself. **Extended 2026-08-30** with a sibling script,
+  `scripts/project-debt-payoff.py` (same amortization math, run in reverse — a fixed-payment schedule
+  paying a balance down to zero instead of growing one, erroring if the payment doesn't even cover
+  interest), and `references/formula.md` (plain-language explanation of both scripts' math, mirroring
+  `savings-goals/references/compound-interest.md`'s tone — read by the agent when a user asks *how* a
+  number was derived). Both scripts share the same `SkillActionClassifier` trust bucket
+  (`SkillActionKind.ExecuteScript`, gated by `AutoApproveExecuteScript`) — no new toggle.
 
 **Correction (2026-08-12): the original "no `scripts/` folder, keeps `SubprocessScriptRunner` out of the
 Docker image" rationale was wrong about why that type doesn't appear here.** `SubprocessScriptRunner` is
