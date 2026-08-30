@@ -40,13 +40,23 @@ public sealed class FileSkillTests
     }
 
     [Fact]
-    public async Task LoadSkill_SavingsCalculator_ListsTheScriptWithItsParametersSchema()
+    public async Task LoadSkill_SavingsCalculator_ListsBothScriptsAndTheFormulaReference()
     {
         var content = await LoadSkillAsync("savings-calculator");
 
         Assert.Contains("scripts/project-savings.py", content);
-        Assert.Contains("<available_resources />", content); // no references/ folder for this skill
+        Assert.Contains("scripts/project-debt-payoff.py", content);
+        Assert.Contains("references/formula.md", content);
         Assert.Contains("\"type\":\"array\"", content); // the generic array-of-strings parameters_schema
+    }
+
+    [Fact]
+    public async Task ReadSkillResource_SavingsCalculator_FormulaReference_ReturnsRealFileContent()
+    {
+        var content = await ReadSkillResourceAsync("savings-calculator", "references/formula.md");
+
+        Assert.Contains("How the numbers are computed", content);
+        Assert.Contains("savings-goals", content); // the hand-off line at the end of the real file
     }
 
     private static async Task<string> LoadSkillAsync(string skillName) =>

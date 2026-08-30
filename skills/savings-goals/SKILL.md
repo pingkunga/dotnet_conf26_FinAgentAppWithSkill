@@ -25,4 +25,5 @@ Two references are available:
 
 Always ground advice in the user's actual goal data when it's available (target amount, target date, current
 amount, monthly contribution) rather than inventing numbers — if you need an exact figure, defer to
-`savings-calculator`.
+`savings-calculator`. If you're continuing from a `savings-calculator` result already in this conversation,
+ground your advice in that real number instead of re-deriving it or ignoring it.
