@@ -142,22 +142,14 @@ public sealed class ChatSessionService(
 
         var skillsBuilder = new AgentSkillsProviderBuilder()
             .UseSkill(budgetSkill)
-            // TODO(spec §4.2): .UseSkill(receiptOcrInlineSkill) — built per-upload from ReceiptUpload.razor,
-            // not appropriate to wire into a general-purpose session agent built here.
             // savings-goals (docs/spec.md §4.3): guidance-only, no scripts/ folder — the runner exists only
-            // because .UseFileSkill(...) requires a non-null one even when there's nothing to ever invoke
-            // (found via a spike: it throws InvalidOperationException at .Build() otherwise).
-            .UseFileSkill(Path.Combine(skillsRoot, "savings-goals"), options: null, scriptRunner: NoScriptsRunner)
+            .UseFileSkill(Path.Combine(skillsRoot, "savings-goals"), options: null, scriptRunner: SubprocessScriptRunner.RunAsync)
             // savings-calculator (docs/spec.md §4.3): the deliberately script-capable counterpart —
-            // SubprocessScriptRunner is trusted here because this whole path is developer-authored content
-            // shipped with the app (never a user upload; see SubprocessScriptRunner.cs's remarks).
             .UseFileSkill(Path.Combine(skillsRoot, "savings-calculator"), options: null, scriptRunner: SubprocessScriptRunner.RunAsync)
+            // .UseFileScriptRunner(SubprocessScriptRunner.RunAsync)
             // receipt-OCR (docs/spec.md §4.2): dynamic source over _dynamicSkills, re-read every turn
-            // (DisableCaching) rather than snapshotted once — the whole point is that RegisterReceiptSkill
-            // can add a skill after this provider is already built and in use. Cost accepted: the file
-            // skills above lose their discovery cache too, since caching is a builder-wide setting — a
-            // few extra small file reads per turn, trivial at this app's scale.
             .UseSource(_ => new DynamicInlineSkillsSource(_dynamicSkills))
+            //DisableCaching rather than snapshotted once — the whole point is that RegisterReceiptSkill
             .DisableCaching();
 
         if (_mcpClient is not null)
@@ -169,23 +161,13 @@ public sealed class ChatSessionService(
         var skillsProvider = skillsBuilder
             .UseOptions(o =>
             {
-                // Reads are never gated, regardless of any per-skill toggle — load_skill/read_skill_resource
-                // stay silent for every skill, including MCP's monthly-summary (docs/spec.md's
-                // approval-toggle plan). run_skill_script now always goes through the approval pipeline;
-                // whether a given call actually stops for a human is decided per-call by
-                // SkillApprovalPolicy below, not by this flag. Found via a scratchpad spike (2026-08-11):
-                // without disabling the first two, load_skill/read_skill_resource would also emit a
-                // ToolApprovalRequestContent and the stream would just stop — no exception, chat looks
-                // permanently "stuck" — which is exactly why this app previously auto-approved all three.
                 o.DisableLoadSkillApproval = true;
                 o.DisableReadSkillResourceApproval = true;
-                o.DisableRunSkillScriptApproval = false;
+                o.DisableRunSkillScriptApproval = false;   //Required Approval Rule for running skill scripts ToolApprovalAgentOptions
             })
             .Build();
 
-        // Wired into AgentFactory's HarnessAgentOptions.ToolApprovalAgentOptions (docs/spec.md's
-        // approval-toggle plan) — always applied, even when both preferences are true, because it's also
-        // what keeps read-only script calls (check_budget_status, list_transactions) from ever surfacing
+        // Wired into AgentFactory's HarnessAgentOptions.ToolApprovalAgentOptions
         // an approval prompt now that DisableRunSkillScriptApproval is false above.
         var toolApprovalOptions = new ToolApprovalAgentOptions
         {
