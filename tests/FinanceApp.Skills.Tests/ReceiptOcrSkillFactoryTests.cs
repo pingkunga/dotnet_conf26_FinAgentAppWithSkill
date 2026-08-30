@@ -161,6 +161,78 @@ public sealed class ReceiptOcrSkillFactoryTests
         Assert.Contains("simulated provider failure", savedReceipt.OcrRawResponse);
     }
 
+    [Fact]
+    public async Task ReceiptStatus_WhenPending_ReturnsPendingMessage_WithoutRunningOcr()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        // chatClient is never dereferenced by the resource — null! makes that a hard guarantee, same
+        // reasoning as the vision-unsupported script test above.
+        var skill = ReceiptOcrSkillFactory.Create(chatClient: null!, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        var result = await RunStatusResourceAsync(skill);
+
+        Assert.Contains("Pending", result);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        Assert.False(await db.Transactions.AnyAsync(t => t.ReceiptId == receipt.Id));
+    }
+
+    [Fact]
+    public async Task ReceiptStatus_WhenSucceeded_ReturnsExtractedFieldsAndTransactionId()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Starbucks","amount":4.5,"date":"2026-08-01","category":"Dining"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+        await RunExtractScriptAsync(skill);
+
+        var result = await RunStatusResourceAsync(skill);
+
+        Assert.Contains("Succeeded", result);
+        Assert.Contains("Starbucks", result);
+        Assert.Contains("Dining", result);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var savedReceipt = await db.Receipts.FirstAsync(r => r.Id == receipt.Id);
+        Assert.Contains(savedReceipt.ResultingTransactionId.ToString()!, result);
+    }
+
+    [Fact]
+    public async Task ReceiptStatus_WhenFailed_ReturnsRawResponse()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Blurry Receipt","date":null}"""); // no amount
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+        await RunExtractScriptAsync(skill);
+
+        var result = await RunStatusResourceAsync(skill);
+
+        Assert.Contains("Failed", result);
+        Assert.Contains("Blurry Receipt", result); // the raw AI response text
+    }
+
+    [Fact]
+    public async Task ReceiptStatus_WhenReceiptDoesNotExist_ReturnsError()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        await using (var db = await OpenDbAsync(dbName, userId)) { } // materialize the InMemory DB, no receipt seeded
+
+        var skill = ReceiptOcrSkillFactory.Create(chatClient: null!, BuildScopeFactory(dbName), userId, receiptId: Guid.NewGuid(), supportsVision: true);
+
+        var result = await RunStatusResourceAsync(skill);
+
+        Assert.Contains("not found", result, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task<string> RunExtractScriptAsync(Microsoft.Agents.AI.AgentInlineSkill skill)
     {
         var script = await skill.GetScriptAsync("extract_receipt", CancellationToken.None);
@@ -170,6 +242,17 @@ public sealed class ReceiptOcrSkillFactoryTests
         // serialized, not the raw string the script returned — found via this test failing, not assumed.
         var element = Assert.IsType<System.Text.Json.JsonElement>(result);
         return element.GetString() ?? throw new InvalidOperationException("Script result wasn't a JSON string.");
+    }
+
+    private static async Task<string> RunStatusResourceAsync(Microsoft.Agents.AI.AgentInlineSkill skill)
+    {
+        var resource = await skill.GetResourceAsync("receipt_status", CancellationToken.None);
+        Assert.NotNull(resource);
+        var result = await resource.ReadAsync(serviceProvider: null, CancellationToken.None);
+        // Same JsonElement-wrapping as RunAsync above — confirmed via reflection against the pinned
+        // Microsoft.Agents.AI 1.17.0 assembly, not assumed.
+        var element = Assert.IsType<System.Text.Json.JsonElement>(result);
+        return element.GetString() ?? throw new InvalidOperationException("Resource result wasn't a JSON string.");
     }
 
     private static IServiceScopeFactory BuildScopeFactory(string dbName)

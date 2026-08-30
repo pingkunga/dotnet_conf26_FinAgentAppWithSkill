@@ -26,7 +26,8 @@ public static class ReceiptOcrSkillFactory
         var skill = new AgentInlineSkill(
             name: $"receipt-ocr-{receiptId:N}",
             description: "Extract vendor, amount, and date from this specific uploaded receipt image and record it as a transaction.",
-            instructions: "Call extract_receipt to run OCR on this receipt and create the resulting transaction from it.",
+            instructions: "Call extract_receipt to run OCR on this receipt and create the resulting transaction from it. " +
+                          "To check this receipt's current status without re-running OCR, read the receipt_status resource instead.",
             license: null,
             compatibility: null,
             allowedTools: null,
@@ -40,14 +41,54 @@ public static class ReceiptOcrSkillFactory
             "Runs OCR on the uploaded receipt image and creates a Transaction from the extracted fields. Takes no arguments — the receipt is fixed at skill-creation time.",
             null);
 
+        // ChatSessionService.cs: DisableReadSkillResourceApproval = true, unconditional, 
+        // what's the status of this receipt"
+        skill.AddResource(
+            "receipt_status",
+            async Task<string> () => await DescribeStatusAsync(scopeFactory, userId, receiptId),
+            "Current status of this receipt (pending/succeeded/failed/manual) and any already-extracted fields, " +
+            "without re-running OCR. Read this to answer status questions instead of calling extract_receipt again.",
+            null);
+
         return skill;
+    }
+
+    private static async Task<string> DescribeStatusAsync(IServiceScopeFactory scopeFactory, Guid userId, Guid receiptId)
+    {
+        using var scope = scopeFactory.CreateScope();
+        await using var db = CreateDbContext(scope.ServiceProvider, userId);
+
+        var receipt = await db.Receipts.Include(r => r.ExtractedCategory).FirstOrDefaultAsync(r => r.Id == receiptId);
+        if (receipt is null)
+        {
+            // Query-filtered to userId already (FinanceDbContext.OnModelCreating) — same "not found or
+            // someone else's" collapse as ExtractAsync's own not-found branch.
+            return $"Error: receipt {receiptId} not found.";
+        }
+
+        if (receipt.OcrStatus == ReceiptOcrStatus.Pending)
+        {
+            return "Status: Pending. No extraction has run yet — call extract_receipt to process it.";
+        }
+
+        if (receipt.OcrStatus == ReceiptOcrStatus.Failed)
+        {
+            return $"Status: Failed. Raw AI response: {receipt.OcrRawResponse ?? "(none)"}.";
+        }
+
+        // Succeeded or Manual — both have real extracted fields worth reporting.
+        var fields = $"vendor={receipt.ExtractedVendor ?? "(unknown)"}, " +
+                     $"amount={(receipt.ExtractedAmount is { } a ? a.ToString("C") : "(unknown)")}, " +
+                     $"date={(receipt.ExtractedDate is { } d ? d.ToString("d") : "(unknown)")}, " +
+                     $"category={receipt.ExtractedCategory?.Name ?? "(unknown)"}";
+
+        return $"Status: {receipt.OcrStatus}. {fields}. Linked transaction: {receipt.ResultingTransactionId}.";
     }
 
     private static async Task<string> ExtractAsync(
         IChatClient chatClient, IServiceScopeFactory scopeFactory, Guid userId, Guid receiptId, bool supportsVision)
     {
-        // Graceful degradation (docs/spec.md §4.2) — never touches chatClient when the configured provider
-        // isn't vision-capable (AiOptions.SupportsVision, defaulted per-provider in Program.cs).
+        // Graceful degradation
         if (!supportsVision)
         {
             return "This AI provider doesn't support image input — please enter the receipt's vendor, " +
