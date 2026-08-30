@@ -14,6 +14,19 @@
 
 <MudText Typo="Typo.h5" Class="mb-4">Budgets</MudText>
 
+@if (allocation is not null)
+{
+    <MudAlert Severity="@(allocation.IsOverAllocated ? Severity.Warning : Severity.Info)" Class="mb-4">
+        Income this month: @allocation.IncomeTotal.ToString("C") ·
+        Allocated: @allocation.AllocatedTotal.ToString("C") ·
+        Available: @allocation.AvailableToAllocate.ToString("C")
+        @if (allocation.IsOverAllocated)
+        {
+            <text> — total allocated exceeds income.</text>
+        }
+    </MudAlert>
+}
+
 <MudPaper Class="pa-4 mb-4">
     <EditForm Model="this" OnValidSubmit="SetBudgetAsync">
         <MudGrid>
@@ -84,6 +97,7 @@
 @code {
     private List<Category> categories = [];
     private List<BudgetStatus> statuses = [];
+    private BudgetAllocationSummary? allocation;
     private bool loading = true;
 
     private Guid? categoryId;
@@ -102,6 +116,7 @@
         var period = DateOnly.FromDateTime(periodMonth ?? DateTime.Today);
         // Shared with BudgetSkill.CheckBudgetStatusAsync (docs/spec.md §7) — same computation, one source of truth.
         statuses = (await BudgetRepository.GetBudgetStatusAsync(Db, CurrentUser.UserId!.Value, period)).ToList();
+        allocation = await BudgetRepository.GetAllocationSummaryAsync(Db, CurrentUser.UserId!.Value, period);
         loading = false;
     }
 

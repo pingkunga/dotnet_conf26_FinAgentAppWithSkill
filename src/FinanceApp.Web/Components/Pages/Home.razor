@@ -1,7 +1,194 @@
-﻿@page "/"
+@page "/"
+@rendermode InteractiveServer
+@using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Entities
+@using FinanceApp.Core.Repositories
+@using Microsoft.EntityFrameworkCore
+@inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
+@inject ISnackbar Snackbar
 
-<PageTitle>Home</PageTitle>
+<PageTitle>Dashboard</PageTitle>
 
-<h1>Hello, world!</h1>
+<AuthorizeView Context="authState">
+    <Authorized>
+        <MudText Typo="Typo.h5" Class="mb-4">Dashboard</MudText>
 
-Welcome to your new app.
+        @* 1. Top up — the deliberate first step of the flow: money in before anything else. *@
+        <MudPaper Class="pa-4 mb-4">
+            <MudText Typo="Typo.subtitle1" Class="mb-2">Top up funds</MudText>
+            <EditForm Model="this" OnValidSubmit="TopUpAsync">
+                <MudGrid>
+                    <MudItem xs="12" sm="3">
+                        <MudNumericField T="decimal" @bind-Value="topUpAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
+                    </MudItem>
+                    <MudItem xs="12" sm="3">
+                        <MudDatePicker @bind-Date="topUpDate" Label="Date" Editable="true" />
+                    </MudItem>
+                    <MudItem xs="12" sm="4">
+                        <MudTextField @bind-Value="topUpDescription" Label="Description (optional)" />
+                    </MudItem>
+                    <MudItem xs="12" sm="2" Class="d-flex align-center">
+                        <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Success" FullWidth="true">Top up</MudButton>
+                    </MudItem>
+                </MudGrid>
+            </EditForm>
+        </MudPaper>
+
+        @* 2. Budget summary — what's available to allocate, and per-category status. *@
+        <MudPaper Class="pa-4 mb-4">
+            <MudText Typo="Typo.subtitle1" Class="mb-2">This month's budget</MudText>
+            @if (allocation is not null)
+            {
+                <MudAlert Severity="@(allocation.IsOverAllocated ? Severity.Warning : Severity.Info)" Class="mb-3">
+                    Income: @allocation.IncomeTotal.ToString("C") ·
+                    Allocated: @allocation.AllocatedTotal.ToString("C") ·
+                    Available: @allocation.AvailableToAllocate.ToString("C")
+                </MudAlert>
+            }
+            @if (budgetStatuses.Count == 0)
+            {
+                <MudText Typo="Typo.body2">No budgets set for this month yet. <MudLink Href="Budgets">Set one up</MudLink>.</MudText>
+            }
+            else
+            {
+                @foreach (var status in budgetStatuses)
+                {
+                    <div class="mb-2">
+                        <MudText Typo="Typo.body2">
+                            @status.CategoryName: @status.SpentAmount.ToString("C") / @status.LimitAmount.ToString("C")
+                        </MudText>
+                        <MudProgressLinear Value="@((double)Math.Min(status.PercentUsed, 100))"
+                                            Color="@(status.IsOver ? Color.Error : status.IsNear ? Color.Warning : Color.Success)" />
+                    </div>
+                }
+            }
+        </MudPaper>
+
+        @* 3. Recent activity. *@
+        <MudPaper Class="pa-4 mb-4">
+            <MudText Typo="Typo.subtitle1" Class="mb-2">Recent transactions</MudText>
+            @if (recentTransactions.Count == 0)
+            {
+                <MudText Typo="Typo.body2">No transactions yet.</MudText>
+            }
+            else
+            {
+                <MudTable Items="recentTransactions" Dense="true" Hover="true">
+                    <HeaderContent>
+                        <MudTh>Date</MudTh>
+                        <MudTh>Category</MudTh>
+                        <MudTh>Amount</MudTh>
+                        <MudTh>Description</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Date">@context.OccurredOn.ToString("yyyy-MM-dd")</MudTd>
+                        <MudTd DataLabel="Category">@(context.Category?.Name ?? "(uncategorized)")</MudTd>
+                        <MudTd DataLabel="Amount">@context.Amount.ToString("C")</MudTd>
+                        <MudTd DataLabel="Description">@context.Description</MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        </MudPaper>
+
+        @* 4. Goals progress. *@
+        <MudPaper Class="pa-4 mb-4">
+            <MudText Typo="Typo.subtitle1" Class="mb-2">Savings goals</MudText>
+            @if (goals.Count == 0)
+            {
+                <MudText Typo="Typo.body2">No savings goals yet. <MudLink Href="Goals">Create one</MudLink>.</MudText>
+            }
+            else
+            {
+                @foreach (var goal in goals)
+                {
+                    <div class="mb-2">
+                        <MudText Typo="Typo.body2">@goal.Name: @goal.CurrentAmount.ToString("C") / @goal.TargetAmount.ToString("C")</MudText>
+                        <MudProgressLinear Value="@((double)GoalPercent(goal))" Color="Color.Primary" />
+                    </div>
+                }
+            }
+        </MudPaper>
+    </Authorized>
+    <NotAuthorized>
+        <MudPaper Class="pa-8 d-flex flex-column align-center">
+            <MudText Typo="Typo.h5" Class="mb-2">Welcome to MyFinanceWithAgentSkill</MudText>
+            <MudText Typo="Typo.body1" Class="mb-4">Sign in or register to start tracking your finances.</MudText>
+            <div>
+                <MudButton Href="Account/Login" Variant="Variant.Filled" Color="Color.Primary" Class="mr-2">Login</MudButton>
+                <MudButton Href="Account/Register" Variant="Variant.Outlined" Color="Color.Primary">Register</MudButton>
+            </div>
+        </MudPaper>
+    </NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private decimal topUpAmount;
+    private DateTime? topUpDate = DateTime.Today;
+    private string? topUpDescription;
+
+    private BudgetAllocationSummary? allocation;
+    private List<BudgetStatus> budgetStatuses = [];
+    private List<Transaction> recentTransactions = [];
+    private List<SavingsGoal> goals = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (CurrentUser.UserId is null)
+        {
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        var userId = CurrentUser.UserId!.Value;
+        var period = DateOnly.FromDateTime(DateTime.Today);
+
+        budgetStatuses = (await BudgetRepository.GetBudgetStatusAsync(Db, userId, period)).ToList();
+        allocation = await BudgetRepository.GetAllocationSummaryAsync(Db, userId, period);
+
+        recentTransactions = await Db.Transactions
+            .Include(t => t.Category)
+            .OrderByDescending(t => t.OccurredOn)
+            .Take(10)
+            .ToListAsync();
+
+        goals = await Db.SavingsGoals.OrderBy(g => g.TargetDate ?? DateOnly.MaxValue).ToListAsync();
+    }
+
+    private static decimal GoalPercent(SavingsGoal goal) =>
+        goal.TargetAmount == 0m ? 0m : Math.Min(goal.CurrentAmount / goal.TargetAmount * 100m, 100m);
+
+    private async Task TopUpAsync()
+    {
+        if (topUpAmount <= 0)
+        {
+            Snackbar.Add("Enter a top-up amount greater than zero.", Severity.Warning);
+            return;
+        }
+
+        Db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = CurrentUser.UserId!.Value,
+            CategoryId = SeedData.IncomeCategoryId,
+            Amount = topUpAmount,
+            OccurredOn = DateOnly.FromDateTime(topUpDate ?? DateTime.Today),
+            Description = string.IsNullOrWhiteSpace(topUpDescription) ? null : topUpDescription,
+            Source = TransactionSource.Manual,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        await Db.SaveChangesAsync();
+
+        topUpAmount = 0;
+        topUpDescription = null;
+        topUpDate = DateTime.Today;
+
+        await LoadAsync();
+        Snackbar.Add("Funds topped up.", Severity.Success);
+    }
+}

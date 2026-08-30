@@ -41,6 +41,27 @@
     </EditForm>
 </MudPaper>
 
+@if (contributingGoal is not null)
+{
+    <MudPaper Class="pa-4 mb-4">
+        <MudText Typo="Typo.subtitle1" Class="mb-2">Contribute to "@contributingGoal.Name"</MudText>
+        <EditForm Model="this" OnValidSubmit="ContributeAsync">
+            <MudGrid>
+                <MudItem xs="12" sm="4">
+                    <MudNumericField T="decimal" @bind-Value="contributeAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
+                </MudItem>
+                <MudItem xs="12" sm="4">
+                    <MudDatePicker @bind-Date="contributeDate" Label="Date" Editable="true" />
+                </MudItem>
+                <MudItem xs="12" sm="4" Class="d-flex align-center ga-2">
+                    <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Success">Confirm</MudButton>
+                    <MudButton Variant="Variant.Text" OnClick="CancelContribute">Cancel</MudButton>
+                </MudItem>
+            </MudGrid>
+        </EditForm>
+    </MudPaper>
+}
+
 <MudTable Items="goals" Hover="true" Loading="loading">
     <HeaderContent>
         <MudTh>Name</MudTh>
@@ -65,6 +86,7 @@
                        OnClick="@(() => Nav.NavigateTo($"/Chat?goalId={context.Id}"))">
                 Get guidance
             </MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Success" OnClick="@(() => StartContribute(context))">Contribute</MudButton>
             <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
             <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Error" OnClick="@(() => DeleteAsync(context))">Delete</MudButton>
         </MudTd>
@@ -84,6 +106,10 @@
     private decimal currentAmount;
     private DateTime? targetDate;
     private decimal? monthlyContribution;
+
+    private SavingsGoal? contributingGoal;
+    private decimal contributeAmount;
+    private DateTime? contributeDate = DateTime.Today;
 
     protected override async Task OnInitializedAsync()
     {
@@ -136,9 +162,11 @@
             var existing = await Db.SavingsGoals.FirstOrDefaultAsync(g => g.Id == editingId);
             if (existing is not null)
             {
+                // CurrentAmount is intentionally NOT touched here — it's real accumulated progress, only
+                // ever changed by ContributeAsync below (or seeded once on create). An edit here should
+                // never silently overwrite it with whatever stale value sits in the form.
                 existing.Name = name;
                 existing.TargetAmount = targetAmount;
-                existing.CurrentAmount = currentAmount;
                 existing.TargetDate = dateOnly;
                 existing.MonthlyContribution = monthlyContribution;
             }
@@ -154,8 +182,68 @@
     {
         Db.SavingsGoals.Remove(goal);
         await Db.SaveChangesAsync();
+
+        if (goal.Id == contributingGoal?.Id)
+        {
+            CancelContribute();
+        }
+
         await LoadAsync();
         Snackbar.Add("Goal deleted.", Severity.Success);
+    }
+
+    private void StartContribute(SavingsGoal goal)
+    {
+        contributingGoal = goal;
+        contributeAmount = 0;
+        contributeDate = DateTime.Today;
+    }
+
+    private void CancelContribute()
+    {
+        contributingGoal = null;
+        contributeAmount = 0;
+        contributeDate = DateTime.Today;
+    }
+
+    // Records a contribution as a real Transaction (Savings category) and bumps CurrentAmount in the
+    // same SaveChangesAsync — atomic, mirroring BudgetSkill.TransferBudgetAsync's two-write pattern.
+    // Known limitation: no FK links the Transaction back to this goal, so deleting it later from
+    // /Transactions will desync CurrentAmount from reality — accepted, documented, not fixed this pass.
+    private async Task ContributeAsync()
+    {
+        if (contributingGoal is null || contributeAmount <= 0)
+        {
+            Snackbar.Add("Enter a contribution amount greater than zero.", Severity.Warning);
+            return;
+        }
+
+        var goal = await Db.SavingsGoals.FirstOrDefaultAsync(g => g.Id == contributingGoal.Id);
+        if (goal is null)
+        {
+            CancelContribute();
+            return;
+        }
+
+        var occurredOnDate = DateOnly.FromDateTime(contributeDate ?? DateTime.Today);
+
+        Db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = CurrentUser.UserId!.Value,
+            CategoryId = SeedData.SavingsCategoryId,
+            Amount = contributeAmount,
+            OccurredOn = occurredOnDate,
+            Description = $"Contribution to \"{goal.Name}\"",
+            Source = TransactionSource.Manual,
+            CreatedAtUtc = DateTime.UtcNow,
+        });
+        goal.CurrentAmount += contributeAmount;
+
+        await Db.SaveChangesAsync();
+        CancelContribute();
+        await LoadAsync();
+        Snackbar.Add("Contribution recorded.", Severity.Success);
     }
 
     private void ResetForm()
