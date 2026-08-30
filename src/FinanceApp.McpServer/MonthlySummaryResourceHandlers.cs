@@ -68,11 +68,6 @@ public sealed class MonthlySummaryResourceHandlers(
 
     public async ValueTask<ReadResourceResult> ReadResourceCoreAsync(string uri, CancellationToken cancellationToken)
     {
-        // Verifies-it's-actually-hitting-the-server visibility: HTTP means stdout/console logging is no
-        // longer off-limits (docs/spec.md §5) — watch `dotnet run --project src/FinanceApp.McpServer`'s own
-        // console for this line to confirm a request genuinely arrived, as opposed to the LLM merely
-        // attempting a tool call that errored before ever reaching here (e.g. a `run_skill_script` call
-        // against this skill, which has no script handler at all).
         logger.LogInformation("MCP read_skill_resource: {Uri}", uri);
 
         var text = uri switch
