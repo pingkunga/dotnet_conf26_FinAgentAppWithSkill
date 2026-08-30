@@ -50,10 +50,12 @@ public class SkillApprovalPolicyTests
         Assert.True(SkillApprovalPolicy.IsAutoApproved(call, autoApproveWrites: true, autoApproveExecuteScript: false));
     }
 
-    [Fact]
-    public void SavingsCalculatorScript_GatedOnlyByTheExecuteScriptToggle()
+    [Theory]
+    [InlineData("scripts/project-savings.py")]
+    [InlineData("scripts/project-debt-payoff.py")]
+    public void SavingsCalculatorScript_GatedOnlyByTheExecuteScriptToggle(string scriptName)
     {
-        var call = RunSkillScript("savings-calculator", "scripts/project-savings.py");
+        var call = RunSkillScript("savings-calculator", scriptName);
 
         Assert.False(SkillApprovalPolicy.IsAutoApproved(call, autoApproveWrites: true, autoApproveExecuteScript: false));
         Assert.True(SkillApprovalPolicy.IsAutoApproved(call, autoApproveWrites: false, autoApproveExecuteScript: true));
