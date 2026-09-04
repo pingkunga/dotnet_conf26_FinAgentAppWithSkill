@@ -171,6 +171,8 @@ public sealed class ChatSessionService(
         // an approval prompt now that DisableRunSkillScriptApproval is false above.
         var toolApprovalOptions = new ToolApprovalAgentOptions
         {
+            // By pass
+            // AutoApprovalRules = [AgentSkillsProvider.ReadOnlyToolsAutoApprovalRule],
             AutoApprovalRules =
             [
                 SkillApprovalPolicy.BuildAutoApprovalRule(user.AutoApproveWrites, user.AutoApproveExecuteScript),
