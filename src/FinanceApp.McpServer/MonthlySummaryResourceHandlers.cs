@@ -31,21 +31,24 @@ namespace FinanceApp.McpServer;
 /// "never trust an LLM-provided user-identifier-shaped value" rule — MCP resource/tool arguments are
 /// exactly that, and doubly so now that one process serves every user).
 /// </remarks>
+/// <remarks>
+/// Implements <see cref="IMcpSkillResourceHandler"/> so <see cref="McpSkillRegistry"/> can host it
+/// alongside other skills (added when <c>goals-progress</c> needed a second slot in this server, docs/
+/// spec.md §4.4) — every method/field below this point predates that and is unchanged; the interface
+/// members are thin adapters over them, not a rewrite, so <c>MonthlySummaryResourceHandlersTests</c>'s
+/// direct calls to <see cref="ReadResourceCoreAsync"/>/<see cref="ListResourcesCoreAsync"/> still work
+/// exactly as before.
+/// </remarks>
 public sealed class MonthlySummaryResourceHandlers(
     FinanceDbContext db,
     ICurrentUserAccessor currentUserAccessor,
-    ILogger<MonthlySummaryResourceHandlers> logger)
+    ILogger<MonthlySummaryResourceHandlers> logger) : IMcpSkillResourceHandler
 {
     private const string SkillName = "monthly-summary";
     private const string IndexUri = "skill://index.json";
     private const string SkillMdUri = "skill://monthly-summary/SKILL.md";
     private const string ResourceUriPrefix = "skill://monthly-summary/";
 
-    // Thin wrappers around the *Core methods below, which take plain arguments rather than a
-    // RequestContext<T> — ModelContextProtocol.Server.RequestContext<T>'s only constructor requires a real
-    // (non-null) McpServer + JsonRpcRequest, too heavy to stand up in a unit test. Splitting the actual
-    // logic out keeps it testable without a live transport, same "wrapper vs. testable core" split
-    // ReceiptOcrSkillFactory uses for its own AI-facing script method (docs/spec.md §4.2).
     public static ValueTask<ListResourcesResult> ListResourcesAsync(RequestContext<ListResourcesRequestParams> _, CancellationToken __) =>
         ListResourcesCoreAsync();
 
@@ -85,24 +88,32 @@ public sealed class MonthlySummaryResourceHandlers(
         };
     }
 
-    private static string BuildIndexJson()
+    private static string BuildIndexJson() =>
+        JsonSerializer.Serialize(new { skills = new[] { BuildIndexEntry() } });
+
+    private static object BuildIndexEntry() => new
     {
-        var index = new
-        {
-            skills = new[]
-            {
-                new
-                {
-                    name = SkillName,
-                    type = "skill-md",
-                    description = "Produces a monthly income/expense summary with budget-vs-actual status.",
-                    url = SkillMdUri,
-                    digest = "v1",
-                },
-            },
-        };
-        return JsonSerializer.Serialize(index);
-    }
+        name = SkillName,
+        type = "skill-md",
+        description = "Produces a monthly income/expense summary with budget-vs-actual status.",
+        url = SkillMdUri,
+        digest = "v1",
+    };
+
+    /// <inheritdoc cref="IMcpSkillResourceHandler.IndexEntry"/>
+    object IMcpSkillResourceHandler.IndexEntry => BuildIndexEntry();
+
+    /// <inheritdoc cref="IMcpSkillResourceHandler.ListableResources"/>
+    IEnumerable<Resource> IMcpSkillResourceHandler.ListableResources =>
+        [new Resource { Uri = SkillMdUri, Name = SkillName, MimeType = "text/markdown" }];
+
+    /// <inheritdoc cref="IMcpSkillResourceHandler.CanHandle"/>
+    bool IMcpSkillResourceHandler.CanHandle(string uri) =>
+        uri == SkillMdUri || uri.StartsWith(ResourceUriPrefix, StringComparison.Ordinal);
+
+    /// <inheritdoc cref="IMcpSkillResourceHandler.ReadResourceAsync"/>
+    ValueTask<ReadResourceResult> IMcpSkillResourceHandler.ReadResourceAsync(string uri, CancellationToken cancellationToken) =>
+        ReadResourceCoreAsync(uri, cancellationToken);
 
     private static Task<string> ReadSkillMdAsync(CancellationToken cancellationToken)
     {

@@ -1,8 +1,10 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -174,14 +176,71 @@ public sealed class McpServerProcessTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RealServer_WithValidToken_ListsBothResources()
+    public async Task RealServer_WithValidToken_ListsResourcesFromEverySkillMdHandler()
     {
+        // Archive-type skills (emergency-fund, debt-payoff-strategies) have no separate listed SKILL.md —
+        // their content lives entirely inside their one archive resource (see McpSkillRegistryTests for
+        // the general aggregation logic, tested against fakes). Only the two skill-md skills add a listed
+        // resource beyond the shared index itself.
         await using var client = await ConnectAsync(MintToken(Guid.NewGuid()));
 
         var result = await client.ListResourcesAsync();
 
         Assert.Contains(result, r => r.Uri == "skill://index.json");
         Assert.Contains(result, r => r.Uri == "skill://monthly-summary/SKILL.md");
+        Assert.Contains(result, r => r.Uri == "skill://goals-progress/SKILL.md");
+    }
+
+    [Fact]
+    public async Task RealServer_WithValidToken_ReadsGoalsProgressSkillMdOverHttp()
+    {
+        await using var client = await ConnectAsync(MintToken(Guid.NewGuid()));
+
+        var result = await client.ReadResourceAsync("skill://goals-progress/SKILL.md");
+
+        var text = Assert.IsType<TextResourceContents>(Assert.Single(result.Contents));
+        Assert.Contains("name: goals-progress", text.Text);
+    }
+
+    [Fact]
+    public async Task RealServer_WithValidToken_IndexIncludesBothArchiveTypeSkills()
+    {
+        await using var client = await ConnectAsync(MintToken(Guid.NewGuid()));
+
+        var result = await client.ReadResourceAsync("skill://index.json");
+
+        var text = Assert.IsType<TextResourceContents>(Assert.Single(result.Contents));
+        using var doc = JsonDocument.Parse(text.Text);
+        var skills = doc.RootElement.GetProperty("skills").EnumerateArray().ToList();
+
+        var emergencyFund = Assert.Single(skills, s => s.GetProperty("name").GetString() == "emergency-fund");
+        Assert.Equal("archive", emergencyFund.GetProperty("type").GetString());
+        Assert.Equal("skill://emergency-fund/archive.zip", emergencyFund.GetProperty("url").GetString());
+
+        var debtPayoff = Assert.Single(skills, s => s.GetProperty("name").GetString() == "debt-payoff-strategies");
+        Assert.Equal("archive", debtPayoff.GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task RealServer_WithValidToken_ReadsTheEmergencyFundArchiveAsAValidZipOverHttp()
+    {
+        await using var client = await ConnectAsync(MintToken(Guid.NewGuid()));
+
+        var result = await client.ReadResourceAsync("skill://emergency-fund/archive.zip");
+
+        var blob = Assert.IsType<BlobResourceContents>(Assert.Single(result.Contents));
+        Assert.Equal("application/zip", blob.MimeType);
+
+        // Confirmed via a diagnostic spike (real HTTP + a raw curl comparison) that on this SDK version
+        // (ModelContextProtocol.Core 0.4.0-preview.3) BlobResourceContents.Blob carries base64 *text* as
+        // bytes on BOTH sides of the wire — nothing auto-decodes it, on write or on read. The server
+        // (ArchiveSkillResourceHandler) pre-encodes for the same reason this test must decode here.
+        var zipBytes = Convert.FromBase64String(Encoding.UTF8.GetString(blob.Blob.ToArray()));
+        using var archive = new ZipArchive(new MemoryStream(zipBytes), ZipArchiveMode.Read);
+        var skillMdEntry = archive.GetEntry("SKILL.md");
+        Assert.NotNull(skillMdEntry);
+        using var reader = new StreamReader(skillMdEntry.Open());
+        Assert.Contains("name: emergency-fund", await reader.ReadToEndAsync());
     }
 
     /// <summary>
@@ -200,7 +259,7 @@ public sealed class McpServerProcessTests : IAsyncLifetime
         });
 
         var httpEx = Assert.IsType<HttpRequestException>(ex);
-        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, httpEx.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, httpEx.StatusCode);
     }
 
     [Fact]
