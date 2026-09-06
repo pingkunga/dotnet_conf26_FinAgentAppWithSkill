@@ -700,6 +700,67 @@ through the subprocess test, since no
 real Postgres is available in this environment (same shape of ceiling as §4.3's python3 gap and §4.2's
 vision-model gap).
 
+**Pluggable multi-skill registry + 3 more skills on this server (added 2026-09-05).** `MonthlySummaryResourceHandlers`
+originally hardcoded the *entire* `skill://index.json` array and `resources/read` dispatch switch for one
+skill, with `Program.cs` wiring `AddMcpServer()` directly to that one class — there was no way to add a
+second skill without editing that class's own index array/switch. `IMcpSkillResourceHandler` (one
+`IndexEntry`/`ListableResources`/`CanHandle`/`ReadResourceAsync` per skill) plus `McpSkillRegistry` (an
+aggregator, `IEnumerable<IMcpSkillResourceHandler>` injected, merges every handler's index entry and routes
+`resources/read` by `CanHandle`) now sit between `Program.cs` and every skill handler — `Program.cs` wires
+`AddMcpServer()` to the registry once, and adding a skill is one more `AddScoped<IMcpSkillResourceHandler, …>()`
+line, not a `Program.cs`/index-array/switch edit. `MonthlySummaryResourceHandlers` implements the interface
+as thin adapters over its pre-existing `*CoreAsync` methods — unchanged internally, so
+`MonthlySummaryResourceHandlersTests`'s direct calls to them needed no changes at all.
+
+Three more skills were added as the first real exercise of this registry, two via each of the schema's
+other `McpSkillIndexEntry.Type` values (confirmed from `Microsoft.Agents.AI.Mcp`'s own XML doc comments,
+not guessed: the schema defines exactly `skill-md`, `archive`, and `mcp-resource-template`):
+
+- **`goals-progress`** (`skill-md`, `GoalsProgressResourceHandlers`) — fills a real gap: no skill source in
+  this app could read `SavingsGoal` rows at all before this (`savings-goals`/`savings-calculator` are
+  guidance/calculation-only with no DB access; `BudgetSkill.ContributeToGoalAsync` only does a by-name
+  lookup for contribution, never a listing). New `SavingsGoalRepository.GetGoalsProgressAsync` (`FinanceApp.Core/
+  Repositories`, same static-class/record style as `BudgetRepository`) computes `percentComplete` and a
+  linear (not compound-interest) `projectedMonthsRemaining` per goal. No time dimension like
+  `summary-<year>-<month>` — the one live resource is always `resourceName: current`.
+- **`emergency-fund` / `debt-payoff-strategies`** (`archive`, both served by one reusable
+  `ArchiveSkillResourceHandler(skillName, skillFolderPath, description)`) — the first skills in this project
+  to use the `archive` distribution type: the index entry's `url` points at a zip (built once from
+  `src/FinanceApp.McpServer/skills/<name>/{SKILL.md,references/*.md}` via `ZipArchive`, cached in a static
+  in-process dictionary) instead of a bare `SKILL.md` resource. Per `Microsoft.Agents.AI.Mcp`'s own doc
+  comment on `ArchiveEntryLoader`, scripts bundled in an archive are "surfaced as readable resources only;
+  never discovered as executable scripts" — so this mechanism is only used for guidance-only, script-free
+  skills (same shape as `savings-goals`'s own files), never for anything like `savings-calculator`. Content:
+  general emergency-fund sizing/placement guidance, and qualitative snowball-vs-avalanche debt-payoff
+  guidance (pairs with `savings-calculator`'s `project-debt-payoff.py` for the exact numbers, the same
+  "guidance skill defers to the calculator skill for real math" pattern `savings-goals` already established).
+
+**A real wire-format quirk found and worked around, not a design choice**: `BlobResourceContents.Blob`
+(`ReadOnlyMemory<byte>`) does **not** auto-base64 on this pinned package version
+(`ModelContextProtocol.Core 0.4.0-preview.3`) — confirmed by a raw-`curl` JSON-RPC round-trip plus
+`McpServerProcessTests`. Handing it raw zip bytes writes them into the JSON string as literal (mostly
+invalid-UTF8) text — the client then throws decoding it. The workaround, in `ArchiveSkillResourceHandler`:
+set `Blob` to the **UTF8 bytes of an already-base64-encoded string**; any reader (this project's tests
+included) must `Convert.FromBase64String(Encoding.UTF8.GetString(blob.Blob.ToArray()))` to get the real
+bytes back — neither side of the wire decodes/encodes it for you. This almost certainly matches what
+`Microsoft.Agents.AI.Mcp`'s own `ArchiveEntryLoader.DownloadSkillBytesAsync` ("downloads and decodes")
+expects, since it's written against the same underlying client — but that specific path is **not verified
+in this environment** (no live LLM/agent here, same ceiling as this section's other gaps below). Only that
+`ModelContextProtocol.Client.McpClient` round-trips this exact representation correctly, over a real HTTP
+subprocess, is confirmed. Revisit this workaround (and the comment explaining it, in
+`ArchiveSkillResourceHandler.ReadResourceAsync`) if a future package version fixes the asymmetry — a fixed
+writer would need the pre-encoding undone, not left in place.
+
+**Tests added alongside**: `GoalsProgressResourceHandlersTests` and `SavingsGoalRepositoryTests` mirror
+their `monthly-summary`/`MonthlySummaryRepository` counterparts exactly (including a cross-user isolation
+case). `McpSkillRegistryTests` covers the aggregation logic itself (index merge, URI-based routing, unknown
+URI) against small fake handlers, independent of any one skill's own computation. `ArchiveSkillResourceHandlerTests`
+builds a real zip from a real temp directory and reads it back (`IndexEntry`/`ListableResources`/`CanHandle`
+plus the base64 round-trip). `McpServerProcessTests` gained real-HTTP cases for all of the above: listing
+now asserts both skill-md skills' resources are present, the index includes both archive-type entries with
+`type: "archive"`, and reading `skill://emergency-fund/archive.zip` over real HTTP decodes to a valid zip
+containing the real `SKILL.md`.
+
 **Future idea, not decided/scheduled (2026-08-12), and deliberately not bundled into this pass**: this
 skill is the one place in the app where
 `Microsoft.Agents.AI.Harness`'s `HarnessAgent` (evaluated and *not* adopted for the file-skill trust-boundary
