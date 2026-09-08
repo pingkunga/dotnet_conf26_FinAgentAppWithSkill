@@ -874,6 +874,45 @@ never committed.
 **Migrations**: applied automatically on `Web` startup (§5), guarded by `AUTO_MIGRATE` so it can be
 disabled later without a code change if a multi-instance deployment is ever needed.
 
+**Correction (2026-09-06): the "one image for both `Web` and `McpServer`" design above is superseded —
+implemented as two separate Dockerfiles/compose services instead.** It was written before §5's HTTP
+migration, when `McpServer` was still a per-session subprocess `Web` spawned; now that it's a standing
+ASP.NET Core service with its own port and JWT-bearer auth, bundling it into `Web`'s image would mean
+running two independent Kestrel processes out of one container for no benefit. What's actually
+implemented:
+- **`src/FinanceApp.Web/Dockerfile`** — publishes only `Web` (+ `Core`/`AI`/`Skills` + repo-root
+  `skills/`, already part of its publish output per §4.3). The claim above that the runtime image needs
+  **no** Python was also already stale by the time it mattered — §4.3's `savings-calculator` *does* have
+  a real `scripts/` folder (added after this section was first written) — so this image's final stage
+  installs `python3` via `apt-get`, same interpreter `SubprocessScriptRunner` shells out to.
+- **`src/FinanceApp.McpServer/Dockerfile`** — publishes only `McpServer` + `Core` (+ its own `skills/`,
+  the 4 skills from §4.4). Installs `curl` only, for `docker-compose.yml`'s healthcheck against the
+  already-existing `GET /health` endpoint (`Program.cs`, `AllowAnonymous`) — no Python needed here, since
+  none of this server's skills are script-backed.
+- **`docker-compose.yml`** gained a real `mcpserver` service (`depends_on: postgres healthy`, its own
+  healthcheck) and a real `web` service (no longer commented out) that `depends_on: mcpserver healthy`
+  and gets `Mcp__BaseUrl=http://mcpserver:8080` + a shared `Mcp__SigningKey` (new `MCP_SIGNING_KEY` env
+  var, added to `.env.example`) — the same symmetric-key relationship §5 already established between the
+  two projects' `appsettings.json`, just parameterized for compose instead of checked in.
+- `.dockerignore` was added (didn't exist before) to keep `bin/`/`obj/`/`.git/` and a couple of stray
+  untracked files out of the build context.
+
+**A real gotcha found via a live `docker compose up` spike, not assumed**: `McpServer`'s checked-in
+`appsettings.json` pins `"Urls": "http://localhost:5299"` for the local dev loop. Setting an
+`ASPNETCORE_URLS` **environment variable** on the container does **not** override this — confirmed by
+inspecting the running container (the env var was present) while the startup log still reported binding
+to the checked-in `localhost:5299` value, which is loopback-only and unreachable from `web`'s container
+or the healthcheck. Root cause: `ASPNETCORE_URLS` only maps to the `"urls"` config key through the
+*host-bootstrap* configuration source, which loads **before** `appsettings.json` in the default
+`WebApplicationBuilder` precedence chain — the plain environment-variables provider added later doesn't
+re-map that name, so nothing at env-var precedence ever beats an explicit `Urls` entry in
+`appsettings.json`. The fix that actually works: pass `--urls=http://+:8080` as a container **command**
+argument (`docker-compose.yml`'s `mcpserver.command`) — command-line configuration is the highest-precedence
+source, so it wins regardless of what `appsettings.json` says. Verified end-to-end: `docker compose up`
+brings `postgres` → `mcpserver` (healthy) → `web` up cleanly, `web`'s container can reach
+`http://mcpserver:8080/health` over the compose network, and `\dt` against the running Postgres container
+shows all expected tables after auto-migration.
+
 ---
 
 ## 7. Blazor UI Pages
