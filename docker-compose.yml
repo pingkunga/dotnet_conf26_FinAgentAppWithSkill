@@ -15,23 +15,59 @@ services:
       timeout: 5s
       retries: 10
 
-  # web:
-  #   build: { context: ., dockerfile: src/FinanceApp.Web/Dockerfile }
-  #   depends_on: { postgres: { condition: service_healthy } }
-  #   environment:
-  #     ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:-changeme}"
-  #     AI__ENGINE_TYPE: ${AI__ENGINE_TYPE:-Ollama}
-  #     AI__ENDPOINT: ${AI__ENDPOINT:-http://host.docker.internal:11434}
-  #     AI__MODEL_NAME: ${AI__MODEL_NAME:-llama3.2}
-  #     AI__API_KEY: ${AI__API_KEY:-}
-  #     AI__SUPPORTS_VISION: ${AI__SUPPORTS_VISION:-false}
-  #     # Same names on both sides on purpose — .env's AI__* vars pass straight through, no renaming.
-  #     # (This block predates ChatClientFactory's real implementation, docs/spec.md §3.1/§3.2 — it
-  #     # originally guessed PascalCase container-side names (AI__EngineType) fed from single-underscore
-  #     # .env names (AI_ENGINE_TYPE); §3.2 now documents that ChatClientFactory actually reads ALL_CAPS
-  #     # keys via indexer, so both sides were updated to match instead of introducing a rename.)
-  #   ports: ["8080:8080"]
-  #   # added once src/FinanceApp.Web/Dockerfile exists — see docs/spec.md §6
+
+  mcpserver:
+    build: { context: ., dockerfile: src/FinanceApp.McpServer/Dockerfile }
+    depends_on: { postgres: { condition: service_healthy } }
+    environment:
+      ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:-changeme}"
+     
+      Mcp__SigningKey: ${MCP_SIGNING_KEY:-dev-only-shared-secret-CHANGE-ME-32-bytes-min}
+    
+    command: ["--urls=http://+:8080"]
+    ports:
+      - "5299:8080"
+    healthcheck:
+      # GET /health is AllowAnonymous (Program.cs) specifically so this healthcheck doesn't need a token.
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: { context: ., dockerfile: src/FinanceApp.Web/Dockerfile }
+    depends_on:
+      postgres: { condition: service_healthy }
+      mcpserver: { condition: service_healthy }
+    environment:
+      ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:-changeme}"
+      # `mcpserver` resolves via the compose network's built-in DNS — no published port needed for this
+      # hop, 5299:8080 above is only for host-side debugging/manual token tools. Overridable via
+      # MCP_BASE_URL for a deployment where the mcpserver service has a different name/host.
+      Mcp__BaseUrl: ${MCP_BASE_URL:-http://mcpserver:8080}
+      Mcp__SigningKey: ${MCP_SIGNING_KEY:-dev-only-shared-secret-CHANGE-ME-32-bytes-min}
+      AI__ENGINE_TYPE: ${AI__ENGINE_TYPE:-Ollama}
+      AI__ENDPOINT: ${AI__ENDPOINT:-http://host.docker.internal:11434}
+      AI__MODEL_NAME: ${AI__MODEL_NAME:-llama3.2}
+      AI__API_KEY: ${AI__API_KEY:-}
+      AI__SUPPORTS_VISION: ${AI__SUPPORTS_VISION:-false}
+      # Same names on both sides on purpose — .env's AI__* vars pass straight through, no renaming.
+      # (This block predates ChatClientFactory's real implementation, docs/spec.md §3.1/§3.2 — it
+      # originally guessed PascalCase container-side names (AI__EngineType) fed from single-underscore
+      # .env names (AI_ENGINE_TYPE); §3.2 now documents that ChatClientFactory actually reads ALL_CAPS
+      # keys via indexer, so both sides were updated to match instead of introducing a rename.)
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true} # already the default if unset (Program.cs) — explicit here for discoverability
+    ports: ["8080:8080"]
+
+  # Ollama itself is not containerized by default — `web`'s AI__ENDPOINT above assumes it's running on
+  # the host and reaches it via host.docker.internal. Uncomment (and point AI__ENDPOINT at
+  # http://ollama:11434 instead) if you'd rather run it inside compose too.
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   ports: ["11434:11434"]
+  #   volumes:
+  #     - ollama-data:/root/.ollama
 
 volumes:
   pgdata:
+  # ollama-data:

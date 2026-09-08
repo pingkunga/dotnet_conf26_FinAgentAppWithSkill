@@ -1,0 +1,19 @@
+# Build artifacts — every Dockerfile COPYs specific source paths, never the whole context, but keeping
+# these out still shrinks what gets sent to the Docker daemon on every build.
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+.git/
+.gitignore
+*.user
+
+# Local secrets / machine-specific files — never belong in a build context.
+.env
+*.pubxml
+*.publishproj
+
+# Stray files that shouldn't exist in the repo at all (see CLAUDE.md / commit-history notes) — excluded
+# here too so a build never accidentally picks them up.
+Note.txt
+FinanceApp.McpServerStdIO.zip
