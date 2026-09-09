@@ -3,7 +3,7 @@
 @using System.Security.Claims
 @inject NavigationManager NavigationManager
 
-<MudThemeProvider />
+<MudThemeProvider Theme="AppTheme.Default" />
 @*
     Each provider gets its own explicit rendermode attribute, not inherited from a global default on
     Routes — that global-default approach broke Identity's static SSR pages (docs/spec.md §7: they render
