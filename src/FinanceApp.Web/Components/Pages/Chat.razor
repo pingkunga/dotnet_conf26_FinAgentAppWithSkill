@@ -10,6 +10,7 @@
 @using Microsoft.Extensions.AI
 @inject ChatSessionService ChatSession
 @inject FinanceDbContext Db
+@inject ILogger<Chat> Logger
 
 <PageTitle>Chat</PageTitle>
 
@@ -160,6 +161,7 @@
         }
         catch (Exception ex)
         {
+            ChatErrorDiagnostics.LogFull(Logger, ex, "Chat.SendAsync");
             assistantEntry.Text = $"(error: {ex.Message})";
         }
         finally
@@ -222,6 +224,7 @@
         }
         catch (Exception ex)
         {
+            ChatErrorDiagnostics.LogFull(Logger, ex, "Chat.RespondToApprovalAsync");
             lastAssistantEntry.Text += $"\n\n(error: {ex.Message})";
         }
         finally

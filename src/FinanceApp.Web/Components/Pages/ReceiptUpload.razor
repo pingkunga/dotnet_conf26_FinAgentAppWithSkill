@@ -15,6 +15,7 @@
 @inject ISnackbar Snackbar
 @inject ChatSessionService ChatSession
 @inject AiOptions AiOptions
+@inject ILogger<ReceiptUpload> Logger
 
 <PageTitle>Receipts</PageTitle>
 
@@ -279,6 +280,7 @@
         }
         catch (Exception ex)
         {
+            ChatErrorDiagnostics.LogFull(Logger, ex, "ReceiptUpload.ExtractAsync");
             extractionResultText = $"(error: {ex.Message})";
         }
         finally
@@ -337,6 +339,7 @@
         }
         catch (Exception ex)
         {
+            ChatErrorDiagnostics.LogFull(Logger, ex, "ReceiptUpload.RespondToApprovalAsync");
             extractionResultText += $"\n\n(error: {ex.Message})";
         }
         finally
