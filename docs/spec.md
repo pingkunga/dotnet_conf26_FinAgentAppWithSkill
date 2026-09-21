@@ -966,6 +966,26 @@ real but specifically **not observable by any test this session had been using**
 more. Any future render-mode-adjacent change needs either a real browser test or an explicit caveat that the
 circuit-connect behavior is unverified, not a claim of "confirmed working" based on curl alone.
 
+**Theme — green, not MudBlazor's default purple (added 2026-09-09).** The app never had a custom
+`MudTheme` before this — `<MudThemeProvider />` in `MainLayout.razor` was called with no `Theme` at
+all, so every screen simply showed MudBlazor's library-default purple (`#594AE2` family). That wasn't
+a branding decision, just an unset default. `Components/Layout/AppTheme.cs` now supplies a `MudTheme`
+wired via `<MudThemeProvider Theme="AppTheme.Default" />` (still no `@rendermode` on that provider —
+see the render-mode note above; adding one would reproduce the static-SSR Identity-page break).
+`PaletteLight.Primary`/`AppbarBackground` = `Colors.Green.Darken3` (`#2E7D32`) — chosen specifically
+because it's the first Material green shade that clears WCAG AA (4.5:1) for white AppBar/button text;
+`Default`/`Darken1`/`Darken2` all fail that check. `Secondary`/`Tertiary`/`Success`/`Info`/`Warning`/
+`Error` are deliberately left at MudBlazor's defaults — this is a single-hue swap, not a full repaint.
+One thing worth watching visually (not a bug, just two greens now sharing a page):
+`PaletteLight.Success` is itself green by MudBlazor default (`#00C853`) and carries finance-semantic
+meaning (`Budgets.razor`'s status chips/progress bars, `Home.razor`'s "Top up" button, `Goals.razor`'s
+"Confirm"/"Contribute" buttons) — `Darken3` was picked partly for being visually distinct enough from
+`#00C853` up close, but this hasn't been screenshot-verified. `PaletteDark.Primary` (`Colors.Green.Lighten1`)
+and `PrimaryContrastText` (black) are also set, for future-proofing — but **unverified in this
+environment**: no dark-mode toggle exists anywhere in the app to actually render `PaletteDark`, so
+this is contrast math, not a visual confirmation, same caveat pattern as this doc's python3/vision-model
+gaps elsewhere.
+
 `src/FinanceApp.Web/Components/Pages/`:
 - **`Transactions.razor`** — plain CRUD grid over `Transaction`, direct repository calls, no agent
   involved. Proves the agent is assistive, not the only way to enter data.
