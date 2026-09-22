@@ -32,6 +32,13 @@ public sealed class Receipt
 
     public Category? ExtractedCategory { get; set; }
 
+    /// <summary>
+    /// The currency actually recorded on the resulting <see cref="Transaction"/> — either detected from
+    /// the receipt image by OCR, or the user's <see cref="ApplicationUser.PreferredCurrency"/> when
+    /// detection was unavailable/unrecognized. Null only for receipts predating this field.
+    /// </summary>
+    public string? ExtractedCurrency { get; set; }
+
     /// <summary>Set once the skill has created the resulting Transaction from this receipt.</summary>
     public Guid? ResultingTransactionId { get; set; }
 }

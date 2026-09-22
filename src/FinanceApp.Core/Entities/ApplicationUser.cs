@@ -14,4 +14,8 @@ public sealed class ApplicationUser : IdentityUser<Guid>
     // Per-action-kind approval toggles for AgentSkill
     public bool AutoApproveWrites { get; set; } = true;
     public bool AutoApproveExecuteScript { get; set; } = true;
+
+    // Currency new transactions/top-ups default to, and the target currency
+    // BudgetRepository.GetAllocationSummaryAsync converts everything into.
+    public string PreferredCurrency { get; set; } = "USD";
 }

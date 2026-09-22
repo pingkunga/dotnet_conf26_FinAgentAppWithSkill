@@ -1,3 +1,4 @@
+using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
 using Microsoft.EntityFrameworkCore;
 
@@ -23,12 +24,22 @@ public sealed record BudgetStatus(
 /// <see cref="Entities.CategoryKind.Expense"/> — an Income-kind category's budget (nothing prevents one
 /// being created today) would otherwise double-count against income instead of allocating it.
 /// </summary>
+/// <remarks>
+/// <see cref="IncomeTotal"/> is expressed in whatever currency was passed as <c>targetCurrency</c> to
+/// <see cref="BudgetRepository.GetAllocationSummaryAsync"/> — each transaction's own <see cref="Entities.Transaction.Currency"/>
+/// is converted to it via <see cref="IExchangeRateService"/>. <see cref="AllocatedTotal"/> (from
+/// <see cref="Entities.Budget.LimitAmount"/>) is treated as already being in that currency — <c>Budget</c>
+/// has no currency column of its own. <see cref="ConversionIncomplete"/> is <c>true</c> when at least one
+/// currency present among the user's income transactions couldn't be converted (rate lookup failed) — that
+/// currency's amount is excluded from <see cref="IncomeTotal"/> entirely, never guessed at a 1:1 rate.
+/// </remarks>
 public sealed record BudgetAllocationSummary(
     DateOnly PeriodMonth,
     decimal IncomeTotal,
     decimal AllocatedTotal,
     decimal AvailableToAllocate,
-    bool IsOverAllocated);
+    bool IsOverAllocated,
+    bool ConversionIncomplete);
 
 /// <summary>
 /// Budget-status computation shared by <c>BudgetSkill.CheckBudgetStatusAsync</c> (docs/spec.md §4.1) and,
@@ -100,18 +111,42 @@ public static class BudgetRepository
         FinanceDbContext db,
         Guid userId,
         DateOnly periodMonth,
+        string targetCurrency,
+        IExchangeRateService exchangeRateService,
         CancellationToken cancellationToken = default)
     {
         var normalizedPeriod = new DateOnly(periodMonth.Year, periodMonth.Month, 1);
         var periodEnd = normalizedPeriod.AddMonths(1);
 
-        var incomeTotal = await db.Transactions
+        var incomeByCurrency = await db.Transactions
             .Where(t => t.UserId == userId
                 && t.Category != null && t.Category.Kind == CategoryKind.Income
                 && t.OccurredOn >= normalizedPeriod
                 && t.OccurredOn < periodEnd)
-            .SumAsync(t => (decimal?)t.Amount, cancellationToken) ?? 0m;
+            .GroupBy(t => t.Currency)
+            .Select(g => new { Currency = g.Key, Total = g.Sum(t => t.Amount) })
+            .ToListAsync(cancellationToken);
 
+        var incomeTotal = 0m;
+        var conversionIncomplete = false;
+        foreach (var group in incomeByCurrency)
+        {
+            var rate = group.Currency == targetCurrency
+                ? 1m
+                : await exchangeRateService.GetRateAsync(group.Currency, targetCurrency, cancellationToken);
+
+            if (rate is null)
+            {
+                // Excluded, not guessed at 1:1 — see BudgetAllocationSummary.ConversionIncomplete's doc comment.
+                conversionIncomplete = true;
+                continue;
+            }
+
+            incomeTotal += group.Total * rate.Value;
+        }
+
+        // Budget has no Currency column — treated as already being in targetCurrency (docs/spec.md's known
+        // limitations; see BudgetAllocationSummary's doc comment).
         var allocatedTotal = await db.Budgets
             .Where(b => b.UserId == userId
                 && b.PeriodMonth == normalizedPeriod
@@ -120,6 +155,6 @@ public static class BudgetRepository
 
         var available = incomeTotal - allocatedTotal;
 
-        return new BudgetAllocationSummary(normalizedPeriod, incomeTotal, allocatedTotal, available, available < 0m);
+        return new BudgetAllocationSummary(normalizedPeriod, incomeTotal, allocatedTotal, available, available < 0m, conversionIncomplete);
     }
 }
