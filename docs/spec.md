@@ -27,6 +27,12 @@ Multi-LLM-provider support is modeled directly on the reference project
   4. Monthly summary & advice → **MCP-based skill** (standing HTTP MCP server in the same solution, JWT
      bearer auth — migrated from an earlier stdio-subprocess-per-session design, see §4.4/§5)
 
+  **Supplementary 5th skill, added 2026-09-21 (§9) — does not alter the firm mapping above**:
+  `ExchangeRateSkill` (currency rate lookups/conversion for chat) is a **second** class-based skill sitting
+  alongside `BudgetSkill`. It reuses an already-used skill *type* rather than inventing a 5th type, so the
+  "4 features → 4 distinct skill types" requirement stays intact — it's additive tooling, not one of the 4
+  tracked features.
+
 Package versions below were confirmed live against nuget.org on 2026-08-07
 (`Microsoft.Agents.AI` 1.17.0 stable — this is where `AgentSkillsProvider`/`AgentSkillsProviderBuilder`
 actually ship; `Microsoft.Agents.AI.Mcp` 1.17.0-alpha; `Microsoft.Agents.AI.Anthropic` 1.17.0-preview).
@@ -56,15 +62,16 @@ MyFinanceWithAgentSkill/
 ├── src/
 │   ├── FinanceApp.Core/               # domain entities + EF Core DbContext + repositories (shared by Web & McpServer)
 │   ├── FinanceApp.AI/                 # ChatClientFactory + AgentFactory (isolated LLM-provider risk boundary)
-│   ├── FinanceApp.Skills/             # BudgetSkill (class-based) + ReceiptOcrSkillFactory (inline) — testable, no ASP.NET dep
+│   ├── FinanceApp.Skills/             # BudgetSkill (class-based) + ReceiptOcrSkillFactory (inline) + ExchangeRateSkill (class-based, §9) — testable, no ASP.NET dep
 │   ├── FinanceApp.McpServer/          # standing HTTP MCP server (JWT bearer auth) hosting the monthly-summary skill
 │   └── FinanceApp.Web/                # Blazor Server host: Program.cs, Components/Pages/*, Services/*
 ├── docs/
 │   └── spec.md                        # this file
 ├── tests/
-│   ├── FinanceApp.Skills.Tests/       # xUnit — BudgetSkill/ReceiptOcr scripts, SubprocessScriptRunner, MonthlySummaryRepository, no LLM/python3
+│   ├── FinanceApp.Skills.Tests/       # xUnit — BudgetSkill/ReceiptOcr/ExchangeRateSkill scripts, SubprocessScriptRunner, MonthlySummaryRepository, CurrencyFormatter, no LLM/python3
 │   ├── FinanceApp.AI.Tests/           # xUnit — ChatClientFactory, SkillActivityExtractor, file-skill round trips
-│   └── FinanceApp.McpServer.Tests/    # xUnit — resource-handler logic (InMemory), a real WebApplicationFactory-based concurrent multi-user isolation test, + real HTTP subprocess round trip, no LLM/Postgres
+│   ├── FinanceApp.McpServer.Tests/    # xUnit — resource-handler logic (InMemory), a real WebApplicationFactory-based concurrent multi-user isolation test, + real HTTP subprocess round trip, no LLM/Postgres
+│   └── FinanceApp.Web.Tests/          # xUnit — FrankfurterExchangeRateService against a fake HttpMessageHandler (§9), no real network call
 ```
 
 **Project references**: `Web → Core, AI, Skills` · `McpServer → Core` · `Skills → Core, AI` · nothing
@@ -80,16 +87,24 @@ the hard "agent/skill calls must never leak across users" isolation rule.
 
 `src/FinanceApp.Core/Entities/`:
 - **ApplicationUser** — Identity-backed (`IdentityUser<Guid>`, table `AspNetUsers`), not a hand-rolled
-  entity — see §2a. Adds one custom property, `DisplayName`; `Email`/`UserName` come from Identity itself.
+  entity — see §2a. Adds `DisplayName`, the two `AutoApprove*` skill-approval toggles, and (§9, added
+  2026-09-21) `PreferredCurrency` (defaults `"USD"`) — the currency new transactions default to and the
+  target `BudgetRepository.GetAllocationSummaryAsync` converts everything into.
 - **Category** — `Id, UserId?, Name, Kind(Expense/Income), IsSystemDefault` — **`UserId` is nullable**:
   `null` + `IsSystemDefault = true` marks the global starter set (Groceries, Dining, Transport, Utilities,
   Entertainment, Income, Other), still seeded via `HasData` with no FK target required; user-created
   categories carry a real `ApplicationUser.Id`. (This nullable-FK shape is deliberate — see §2a point 2 for
   why a non-nullable `UserId` here breaks under real per-user rows.)
-- **Transaction** — `Id, UserId, CategoryId?, Amount(decimal 18,2), Currency, OccurredOn, Description, Source(Manual/Agent/ReceiptOcr), ReceiptId?, CreatedAtUtc`
-- **Budget** — `Id, UserId, CategoryId, PeriodMonth, LimitAmount` — unique index `(UserId, CategoryId, PeriodMonth)`
-- **SavingsGoal** — `Id, UserId, Name, TargetAmount, CurrentAmount, TargetDate?, MonthlyContribution?, CreatedAtUtc`
-w- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Manual), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ResultingTransactionId?`
+- **Transaction** — `Id, UserId, CategoryId?, Amount(decimal 18,2), Currency, OccurredOn, Description, Source(Manual/Agent/ReceiptOcr), ReceiptId?, CreatedAtUtc`. `Currency` existed from the start but was
+  dead/unused until §9 (2026-09-21) wired it up: every write path now sets a real value (user's choice on
+  `/Transactions`, or `ApplicationUser.PreferredCurrency` elsewhere) instead of relying on the entity's
+  `"USD"` default.
+- **Budget** — `Id, UserId, CategoryId, PeriodMonth, LimitAmount` — unique index `(UserId, CategoryId, PeriodMonth)`.
+  **No `Currency` column** — §9 treats `LimitAmount` as already being in the user's `PreferredCurrency`, a
+  known limitation, not an oversight.
+- **SavingsGoal** — `Id, UserId, Name, TargetAmount, CurrentAmount, TargetDate?, MonthlyContribution?, CreatedAtUtc`.
+  Same no-`Currency`-column limitation as `Budget` (§9).
+- **Receipt** — `Id, UserId, ImageBytes(bytea), ContentType, UploadedAtUtc, OcrStatus(Pending/Succeeded/Failed/Manual), OcrRawResponse?, ExtractedVendor/Amount/Date/CategoryId, ExtractedCurrency?(§9, added 2026-09-21), ResultingTransactionId?`
 
 Design choices: receipt images stored as `bytea` directly in Postgres (no object storage needed at this
 scale); **monthly summaries are computed on the fly, not persisted** (cheap aggregation, avoids a
@@ -1125,6 +1140,124 @@ gaps elsewhere.
 
 ---
 
+## 9. Multi-currency support (added 2026-09-21, extended 2026-09-22)
+
+Triggered by a user report: `Budgets.razor`/`Home.razor`'s "Income: ¤0.00 · Allocated: ¤0.00 ·
+Available: ¤0.00" alert was unreadable. **Root cause**: `Directory.Build.props`'
+`InvariantGlobalization=true` (§1, deliberate — smaller/ICU-free container images) collapses every
+culture's number formatting to the invariant culture, whose own `NumberFormatInfo.CurrencySymbol` is
+literally `"¤"`, not `"$"` — every `.ToString("C")`/`{value:C}` call in the app inherited this. Investigating
+also surfaced that `Transaction.Currency` (§2) had existed since the initial schema but was **completely
+dead** — no UI ever set it, no aggregation ever read it, every transaction was silently `"USD"`. Scope grew
+from "fix the symbol" to real per-transaction multi-currency support, confirmed with the user across two
+plan-mode rounds.
+
+**`CurrencyFormatter`** (`FinanceApp.Core/Formatting/CurrencyFormatter.cs`) formats money manually —
+`amount.ToString("N2", CultureInfo.InvariantCulture)` plus a small code→symbol map (`USD`→`$`, `THB`→`฿`,
+`EUR`→`€`, `GBP`→`£`, `JPY`→`¥`, anything else → `"CODE "`) — deliberately *not* culture-driven, since
+`InvariantGlobalization=true` is staying. `CurrencyFormatter.SupportedCurrencies` is the single shared list
+backing every currency dropdown in the app (Profile's preferred-currency selector, `Transactions.razor`'s
+per-row picker, `ReceiptUpload.razor`'s correction form) — all five are confirmed present in Frankfurter's
+own supported-currency list (below), so nothing offered in a dropdown can hit the "can't convert this
+currency" path.
+
+**`ApplicationUser.PreferredCurrency`** (new column, defaults `"USD"`) — the currency new transactions
+default to, and the target `GetAllocationSummaryAsync` (below) converts everything into. Selector lives on
+`/Account/Manage`. **That page is static SSR** (no `@rendermode InteractiveServer`, `[SupplyParameterFromForm]`)
+— same MudBlazor trap §2a point 6 already documents for the Identity pages applies here too, and this page's
+own two `AutoApprove*` toggles already demonstrate the fix: the selector had to be a plain
+`<InputSelect @bind-Value="Input.PreferredCurrency">`, **not** `MudSelect`, or it silently fails to bind on a
+real POST. A one-line warning sits next to it: changing this relabels existing budgets/goals, it does not
+convert their amounts (see "Known limitations" below — an honest mitigation, not a fix).
+
+**Per-transaction currency** — `Transactions.razor` (this page *does* run `@rendermode InteractiveServer`,
+so `MudSelect` is fine there, matching its existing category picker) got a free currency choice per
+transaction. Every other transaction-creating path — `Home.razor`'s top-up, `Goals.razor`'s contribute,
+`BudgetSkill`'s `add_transaction`/`top_up_funds`/`contribute_to_goal`, `ReceiptOcrSkillFactory` (absent a
+detected currency, below) — stopped hardcoding the entity's `"USD"` default and now use the user's
+`PreferredCurrency` explicitly instead. No picker was added to those other flows; only the main
+Transactions form gets free choice.
+
+**`IExchangeRateService`** (`FinanceApp.Core/Abstractions/IExchangeRateService.cs`) —
+`Task<decimal?> GetRateAsync(string from, string to, CancellationToken)`, returning `null` when a rate is
+unavailable; callers must handle that explicitly, never assume 1:1. Latest-rate only, no historical/as-of
+parameter — deliberately not built preemptively. `FrankfurterExchangeRateService`
+(`FinanceApp.Web/Services/ExchangeRates/`, first use of `AddHttpClient` in this codebase — `ChatClientFactory`,
+§3.1, uses a raw `new HttpClient()`) is backed by **api.frankfurter.dev**, verified live: no API key
+required, `GET /v1/latest?base=USD&symbols=THB` returns
+`{"amount":1,"base":"USD","date":"...","rates":{"THB":...}}`, and `/v1/currencies` confirms all five
+`CurrencyFormatter.SupportedCurrencies` codes are supported (31 total). Caches a successful lookup per
+calendar day in `IMemoryCache`, and separately keeps a long-TTL "last known good" value per currency pair —
+on an HTTP failure it returns that stale value instead of failing outright; returns `null` only when nothing
+is cached at all for that pair. `FakeExchangeRateService` (test double) lives in `Core/Abstractions/`, not
+next to the real implementation in `Web` — both `ExchangeRateSkillTests` and `BudgetAllocationSummaryTests`
+(in `tests/FinanceApp.Skills.Tests`, which references Core/Skills, not Web) need it; same placement
+convention as `FixedCurrentUserAccessor` (§3.4), same reason.
+
+**`ExchangeRateSkill`** (`FinanceApp.Skills/ExchangeRates/ExchangeRateSkill.cs`) — see §4's note: a second
+class-based skill (`get_exchange_rate`, `convert_amount`), added so chat can answer rate/conversion
+questions directly. Unlike `BudgetSkill`, it touches no per-user data, so `IServiceScopeFactory` isn't
+needed for user-isolation — but it's still the right shape for a different reason:
+`AddHttpClient<IExchangeRateService, FrankfurterExchangeRateService>()` registers a **transient** typed
+client, and `ChatSessionService` (§3.4) holds a skill instance for the whole Blazor circuit. Resolving
+`IExchangeRateService` fresh from a new scope inside each `[AgentSkillScript]` method (rather than once in
+the constructor) avoids holding one transient `HttpClient`-wrapping instance that long, which would never
+benefit from `IHttpClientFactory`'s handler-rotation. Wired into
+`ChatSessionService.GetOrCreateAgentAsync` via `.UseSkill(exchangeRateSkill)`, alongside `.UseSkill(budgetSkill)`.
+
+**`BudgetRepository.GetAllocationSummaryAsync`** (§4.1) gained `targetCurrency`/`IExchangeRateService`
+parameters. Income transactions are grouped by `Currency`; each non-target-currency group is converted via
+the service and summed in — a currency that fails to convert is **excluded from the total entirely**, never
+guessed at 1:1, and flags a new `BudgetAllocationSummary.ConversionIncomplete` bool that
+`Budgets.razor`/`Home.razor` surface as a warning banner. `AllocatedTotal` (from `Budget.LimitAmount`) is
+added in as-is — `Budget` has no `Currency` column (see Known limitations). **`GetBudgetStatusAsync`
+(per-category spent-vs-limit) was deliberately left untouched** — it has the identical currency-blind
+`Sum(t => t.Amount)`, but it's also called by `MonthlySummaryRepository` (§4.4), which runs inside
+`FinanceApp.McpServer` — a separate standing service with its own DI container (§5). Fixing it would mean
+wiring `IExchangeRateService` (+ `HttpClient` + `IMemoryCache`) into a second host, giving it its own
+outbound-internet dependency for no requested benefit — a visible, deliberate cut, not a silent gap.
+
+**Receipt OCR currency detection (2026-09-22 follow-up)** — a natural follow-on question once
+per-transaction currency existed: if OCR can read a receipt's currency, should it convert it?
+**Confirmed with the user: no eager conversion at OCR time.** `ReceiptOcrSkillFactory`'s extraction prompt
+(§4.2) now also asks for a `"currency"` field (ISO 4217 code, or `null`); a returned code is normalized
+(trim + uppercase) and checked against `CurrencyFormatter.SupportedCurrencies` — recognized → used directly
+(a ฿350 receipt for a USD-preferred user records `Amount=350, Currency="THB"` on the `Transaction`, exactly
+like a manually-entered THB transaction would); unrecognized/hallucinated/absent → falls back to the user's
+`PreferredCurrency`, same graceful-degradation principle as `ConversionIncomplete` above. New
+`Receipt.ExtractedCurrency` column records what was actually used, read by `receipt_status` and the
+`/Receipts` table instead of always assuming the preferred currency. When the resolved currency differs
+from preferred, the extraction result text gets a note (same style as the existing vendor-history
+`historyNote`): *"(recorded in THB — converts automatically on Budgets/Home since your preferred currency
+is USD)"*. `ReceiptUpload.razor`'s manual-fields form (the correction path for any receipt's extracted
+fields, §7) gained a currency picker so a human can fix a wrong OCR guess.
+
+**Known limitations (documented, not fixed this pass)**:
+- `Budget.LimitAmount`/`SavingsGoal.TargetAmount`/`CurrentAmount` have no `Currency` column — treated as
+  already being in `PreferredCurrency`. True implicitly before this work too (everything was silently
+  `"USD"`); now an explicit, documented assumption instead of an accident.
+- Changing `PreferredCurrency` relabels existing budgets/goals, never converts their numbers.
+- `GetBudgetStatusAsync`/`MonthlySummaryRepository`/the MCP monthly-summary skill keep the original
+  currency-blind sum (see above) — `FinanceApp.McpServer` was deliberately kept out of this pass.
+- Exchange rates are "latest," not historical — a transaction from three months ago converts at today's
+  rate, an accepted approximation for a personal-finance demo app, not a trading/accounting tool.
+- **The live Frankfurter HTTP call is untested in this environment** (no verified outbound internet access
+  here) — same ceiling as this project's existing python3 (§4.3)/vision-model (§4.2) gaps. Only
+  `FrankfurterExchangeRateServiceTests`' faked-`HttpMessageHandler` cases are verified in-session.
+
+**Tests**: `CurrencyFormatterTests` (pure-function), `FrankfurterExchangeRateServiceTests`
+(`tests/FinanceApp.Web.Tests` — a **new** test project, needed because `FrankfurterExchangeRateService`
+lives in `FinanceApp.Web`, which no existing test project referenced; fake `HttpMessageHandler`, asserts a
+cache hit avoids a second HTTP call and a simulated failure falls back to the cached rate),
+`ExchangeRateSkillTests` (no DB, no EF InMemory — a minimal `ServiceCollection` registering
+`FakeExchangeRateService`, simplest test setup in the app), extended `BudgetAllocationSummaryTests`
+(mixed-currency conversion, `ConversionIncomplete` on an unconvertible currency), extended
+`ReceiptOcrSkillFactoryTests` (detected currency differing from preferred, absent currency field,
+unrecognized code, lowercase-code normalization), and updated `BudgetSkillTests` assertions
+(`{value:C}` → `CurrencyFormatter.Format(...)`, since the underlying format changed).
+
+---
+
 ## Assumptions
 1. Receipt images stored as Postgres `bytea`, not external object storage.
 2. Monthly summaries computed on the fly, never persisted.
@@ -1218,3 +1351,8 @@ feature; that surface area was unused complexity, not a security decision. If ev
   Remaining items: `docker-compose.yml`/`src/FinanceApp.Web/Dockerfile` (§6, including a new `mcpserver`
   compose service now that it's a standing HTTP service), and Step 2 (OAuth 2.1 for external MCP clients,
   deliberately deferred, not started).
+- ~~Multi-currency support~~ — **done** (§9, 2026-09-21/22): `CurrencyFormatter`, `PreferredCurrency`,
+  `IExchangeRateService`/`FrankfurterExchangeRateService`, the supplementary `ExchangeRateSkill`, FX-aware
+  `GetAllocationSummaryAsync`, and receipt-OCR currency detection. See `docs/handoff20260921.md` for the
+  full session summary. Not extended to `GetBudgetStatusAsync`/`FinanceApp.McpServer` or to
+  `Budget`/`SavingsGoal` — see §9's "Known limitations" if that's ever revisited.
