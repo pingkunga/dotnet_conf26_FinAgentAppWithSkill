@@ -44,6 +44,11 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
           says they're "topping up", adding funds, or received income, since it always records against the
           Income category correctly without you having to guess a category name.
         - list_transactions: show recent transactions, optionally filtered by date range or category.
+        - list_categories: look up the user's actual category names (system defaults plus any of their own),
+          grouped by Expense/Income. Use this — or the available-categories list an error message already
+          includes — before guessing or translating a category concept (especially from non-English input)
+          into an English word that might not match what's actually stored; e.g. don't assume
+          "Transportation" when the stored name is "Transport".
         - set_budget: set or update a monthly spending limit for a category. If the response notes the
           month's total allocation now exceeds income, mention that to the user as a heads-up, not a reason
           to refuse the change.
@@ -61,7 +66,9 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
           transaction and updates the goal's progress atomically. Prefer this over asking the user to edit
           the goal's "current amount" by hand.
         Dates are ISO 8601 (yyyy-MM-dd). Amounts are positive numbers; category names are matched
-        case-insensitively against the user's own categories and the global default set.
+        case-insensitively against the user's own categories and the global default set. If a category
+        name doesn't match, the error lists the real available names — retry with the exact stored name
+        (or call list_categories first) instead of guessing another translation or synonym.
         """;
 
     [AgentSkillResource("budgeting-policy")]
@@ -96,7 +103,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         var category = await FindCategoryAsync(db, categoryName);
         if (category is null)
         {
-            return $"Error: no category named '{categoryName}' found.";
+            return await CategoryNotFoundErrorAsync(db, categoryName);
         }
 
         var date = ParseDateOrToday(occurredOn);
@@ -200,6 +207,34 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         return string.Join('\n', lines);
     }
 
+    [AgentSkillScript("list_categories")]
+    public async Task<string> ListCategoriesAsync()
+    {
+        using var scope = scopeFactory.CreateScope();
+        await using var db = CreateDbContext(scope.ServiceProvider);
+
+        var categories = await GetAvailableCategoriesAsync(db);
+        if (categories.Count == 0)
+        {
+            return "No categories available.";
+        }
+
+        var expenseNames = categories.Where(c => c.Kind == CategoryKind.Expense).Select(c => c.Name).ToList();
+        var incomeNames = categories.Where(c => c.Kind == CategoryKind.Income).Select(c => c.Name).ToList();
+
+        var lines = new List<string>();
+        if (expenseNames.Count > 0)
+        {
+            lines.Add($"Expense categories: {string.Join(", ", expenseNames)}");
+        }
+        if (incomeNames.Count > 0)
+        {
+            lines.Add($"Income categories: {string.Join(", ", incomeNames)}");
+        }
+
+        return string.Join('\n', lines);
+    }
+
     [AgentSkillScript("set_budget")]
     public async Task<string> SetBudgetAsync(string categoryName, decimal limitAmount, string? periodMonth)
     {
@@ -209,7 +244,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         var category = await FindCategoryAsync(db, categoryName);
         if (category is null)
         {
-            return $"Error: no category named '{categoryName}' found.";
+            return await CategoryNotFoundErrorAsync(db, categoryName);
         }
 
         var period = NormalizeToMonthStart(ParseDateOrToday(periodMonth));
@@ -268,13 +303,13 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         var fromCategory = await FindCategoryAsync(db, fromCategoryName);
         if (fromCategory is null)
         {
-            return $"Error: no category named '{fromCategoryName}' found.";
+            return await CategoryNotFoundErrorAsync(db, fromCategoryName);
         }
 
         var toCategory = await FindCategoryAsync(db, toCategoryName);
         if (toCategory is null)
         {
-            return $"Error: no category named '{toCategoryName}' found.";
+            return await CategoryNotFoundErrorAsync(db, toCategoryName);
         }
 
         var period = NormalizeToMonthStart(ParseDateOrToday(periodMonth));
@@ -405,6 +440,20 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
     private async Task<Category?> FindCategoryAsync(FinanceDbContext db, string categoryName) =>
         await db.Categories.FirstOrDefaultAsync(c => c.Name.ToLower() == categoryName.ToLower());
+
+    private static async Task<IReadOnlyList<Category>> GetAvailableCategoriesAsync(FinanceDbContext db) =>
+        await db.Categories.OrderBy(c => c.Kind).ThenBy(c => c.Name).ToListAsync();
+
+    /// <summary>
+    /// Never guesses a closest match — lists the real category names so the LLM can self-correct within
+    /// the same turn instead of translating/guessing another synonym (see Instructions).
+    /// </summary>
+    private static async Task<string> CategoryNotFoundErrorAsync(FinanceDbContext db, string categoryName)
+    {
+        var categories = await GetAvailableCategoriesAsync(db);
+        var names = categories.Count == 0 ? "none configured" : string.Join(", ", categories.Select(c => c.Name));
+        return $"Error: no category named '{categoryName}' found. Available categories: {names}.";
+    }
 
     private static DateOnly ParseDateOrToday(string? isoDate) =>
         isoDate is not null && DateOnly.TryParse(isoDate, CultureInfo.InvariantCulture, out var parsed)

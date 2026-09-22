@@ -76,6 +76,80 @@ public sealed class BudgetSkillTests
         Assert.StartsWith("Error:", result);
     }
 
+    [Fact]
+    public async Task AddTransaction_UnknownCategory_ErrorListsActualAvailableCategoryNames()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.AddTransactionAsync(10m, "Transportation", null, null);
+
+        Assert.StartsWith("Error:", result);
+        Assert.Contains("Available categories:", result);
+        var availableList = result[(result.IndexOf("Available categories:", StringComparison.Ordinal))..];
+        Assert.Contains("Transport", availableList);
+        Assert.Contains("Groceries", availableList);
+    }
+
+    [Fact]
+    public async Task SetBudget_UnknownCategory_ErrorListsActualAvailableCategoryNames()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        // Reproduces the exact bug: the LLM guesses "Transportation" for a Thai prompt about travel
+        // expenses, but the seeded category is actually named "Transport".
+        var result = await skill.SetBudgetAsync("Transportation", 500m, "2026-08-01");
+
+        Assert.StartsWith("Error:", result);
+        Assert.Contains("Available categories:", result);
+
+        // "Transport" is a substring of "Transportation", so a naive Assert.Contains("Transport", result)
+        // against the whole string would pass even without the fix — only the suffix after "Available
+        // categories:" actually proves the real category list was added.
+        var availableList = result[(result.IndexOf("Available categories:", StringComparison.Ordinal))..];
+        Assert.Contains("Transport", availableList);
+        Assert.Contains("Groceries", availableList);
+    }
+
+    [Fact]
+    public async Task ListCategories_ReturnsSystemDefaultCategoriesGroupedByExpenseAndIncome()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.ListCategoriesAsync();
+
+        Assert.Contains("Expense categories:", result);
+        Assert.Contains("Transport", result);
+        Assert.Contains("Groceries", result);
+        Assert.Contains("Income categories:", result);
+        Assert.Contains("Income", result);
+    }
+
+    [Fact]
+    public async Task ListCategories_CrossUserIsolation_DoesNotLeakOtherUsersCategory()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userA = Guid.NewGuid();
+        var userB = Guid.NewGuid();
+
+        await using (var seedDb = await OpenSeedDbAsync(dbName, userId: null))
+        {
+            seedDb.Categories.Add(new Category { Id = Guid.NewGuid(), UserId = userA, Name = "User A Custom", Kind = CategoryKind.Expense });
+            await seedDb.SaveChangesAsync();
+        }
+
+        var skillA = new BudgetSkill(BuildScopeFactory(dbName), userA);
+        var skillB = new BudgetSkill(BuildScopeFactory(dbName), userB);
+
+        var resultA = await skillA.ListCategoriesAsync();
+        var resultB = await skillB.ListCategoriesAsync();
+
+        Assert.Contains("User A Custom", resultA);
+        Assert.DoesNotContain("User A Custom", resultB);
+    }
+
     [Theory]
     [InlineData(79, false, false)]  // under Near threshold
     [InlineData(80, true, false)]   // exactly Near
@@ -176,6 +250,34 @@ public sealed class BudgetSkillTests
         var result = await skill.TransferBudgetAsync("Groceries", "NoSuchCategory", 100m, "2026-08-01");
 
         Assert.StartsWith("Error:", result);
+    }
+
+    [Fact]
+    public async Task TransferBudget_UnknownFromCategory_ErrorListsActualAvailableCategoryNames()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.TransferBudgetAsync("Transportation", "Dining", 100m, "2026-08-01");
+
+        Assert.StartsWith("Error:", result);
+        var availableList = result[(result.IndexOf("Available categories:", StringComparison.Ordinal))..];
+        Assert.Contains("Transport", availableList);
+        Assert.Contains("Groceries", availableList);
+    }
+
+    [Fact]
+    public async Task TransferBudget_UnknownToCategory_ErrorListsActualAvailableCategoryNames()
+    {
+        var (skill, dbName, userId) = CreateSkill();
+        await using var _ = await OpenSeedDbAsync(dbName, userId);
+
+        var result = await skill.TransferBudgetAsync("Groceries", "Transportation", 100m, "2026-08-01");
+
+        Assert.StartsWith("Error:", result);
+        var availableList = result[(result.IndexOf("Available categories:", StringComparison.Ordinal))..];
+        Assert.Contains("Transport", availableList);
+        Assert.Contains("Groceries", availableList);
     }
 
     [Fact]
