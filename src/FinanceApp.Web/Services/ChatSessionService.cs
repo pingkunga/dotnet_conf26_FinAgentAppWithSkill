@@ -5,6 +5,7 @@ using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
 using FinanceApp.Skills;
 using FinanceApp.Skills.Budgeting;
+using FinanceApp.Skills.ExchangeRates;
 using FinanceApp.Skills.ReceiptOcr;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Agents.AI;
@@ -133,6 +134,7 @@ public sealed class ChatSessionService(
             ?? throw new InvalidOperationException("ChatSessionService requires a resolvable ApplicationUser.");
 
         var budgetSkill = new BudgetSkill(scopeFactory, userId);
+        var exchangeRateSkill = new ExchangeRateSkill(scopeFactory);
         var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills");
 
         // Attempted once per session, guarded by the _agent is not null check above. Graceful degradation
@@ -142,6 +144,7 @@ public sealed class ChatSessionService(
 
         var skillsBuilder = new AgentSkillsProviderBuilder()
             .UseSkill(budgetSkill)
+            .UseSkill(exchangeRateSkill)
             // savings-goals (docs/spec.md §4.3): guidance-only, no scripts/ folder — the runner exists only
             .UseFileSkill(Path.Combine(skillsRoot, "savings-goals"), options: null, scriptRunner: SubprocessScriptRunner.RunAsync)
             // savings-calculator (docs/spec.md §4.3): the deliberately script-capable counterpart —

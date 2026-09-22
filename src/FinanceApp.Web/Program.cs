@@ -5,6 +5,7 @@ using FinanceApp.Core.Entities;
 using FinanceApp.Web.Components;
 using FinanceApp.Web.Components.Account;
 using FinanceApp.Web.Services;
+using FinanceApp.Web.Services.ExchangeRates;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -90,6 +91,17 @@ builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 // no session state (a stateless per-call factory method), McpAccessTokenIssuer is stateless config+signing.
 builder.Services.AddSingleton<McpAccessTokenIssuer>();
 builder.Services.AddSingleton<McpServerLauncher>();
+
+// IExchangeRateService (multi-currency support) — first use of AddHttpClient in this codebase (the
+// existing ChatClientFactory uses a raw `new HttpClient()`); this is the more idiomatic option for a
+// general outbound REST call. Frankfurter needs no API key. IMemoryCache backs its daily-rate +
+// last-known-good caching (graceful degradation if the API is unreachable).
+builder.Services.AddMemoryCache();
+builder.Services.AddHttpClient<IExchangeRateService, FrankfurterExchangeRateService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.frankfurter.dev/");
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
 
 // ChatSessionService is scoped, not singleton — one AIAgent/AgentSession per Blazor circuit, because the
 // skills it wires (BudgetSkill) close over DB-backed services (docs/spec.md §3.4).
