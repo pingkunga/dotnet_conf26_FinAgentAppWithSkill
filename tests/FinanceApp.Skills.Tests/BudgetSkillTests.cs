@@ -1,6 +1,7 @@
 using FinanceApp.Core;
 using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
+using FinanceApp.Core.Formatting;
 using FinanceApp.Skills.Budgeting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,10 +24,14 @@ public sealed class BudgetSkillTests
     }
 
     /// <summary>
-    /// Registers only <c>DbContextOptions&lt;FinanceDbContext&gt;</c> — mirrors exactly what
-    /// <see cref="BudgetSkill"/>'s manual-construction path (see its class remarks) expects in
-    /// production: it never resolves <see cref="FinanceDbContext"/> or <see cref="ICurrentUserAccessor"/>
-    /// from this container, so neither needs to be registered here.
+    /// Registers <c>DbContextOptions&lt;FinanceDbContext&gt;</c> and a same-currency-only
+    /// <see cref="FakeExchangeRateService"/> — mirrors exactly what <see cref="BudgetSkill"/>'s
+    /// manual-construction path (see its class remarks) expects in production: it never resolves
+    /// <see cref="FinanceDbContext"/> or <see cref="ICurrentUserAccessor"/> from this container, so
+    /// neither needs to be registered here. Every transaction in these tests defaults to "USD" (no
+    /// ApplicationUser is seeded, so <c>GetPreferredCurrencyAsync</c> falls back to it), so an empty rate
+    /// table is enough — <c>SetBudgetAsync</c>'s <c>GetAllocationSummaryAsync</c> call never needs to
+    /// convert anything.
     /// </summary>
     private static IServiceScopeFactory BuildScopeFactory(string dbName)
     {
@@ -34,6 +39,7 @@ public sealed class BudgetSkillTests
         services.AddScoped(_ => new DbContextOptionsBuilder<FinanceDbContext>()
             .UseInMemoryDatabase(dbName)
             .Options);
+        services.AddSingleton<IExchangeRateService>(new FakeExchangeRateService(new Dictionary<(string, string), decimal?>()));
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 
@@ -103,8 +109,8 @@ public sealed class BudgetSkillTests
 
         Assert.Contains("Transferred", result);
         var status = await skill.CheckBudgetStatusAsync("2026-08-01");
-        Assert.Contains($"Groceries: {0m:C} / {700m:C}", status);
-        Assert.Contains($"Dining: {0m:C} / {300m:C}", status);
+        Assert.Contains($"Groceries: {CurrencyFormatter.Format(0m, "USD")} / {CurrencyFormatter.Format(700m, "USD")}", status);
+        Assert.Contains($"Dining: {CurrencyFormatter.Format(0m, "USD")} / {CurrencyFormatter.Format(300m, "USD")}", status);
     }
 
     [Fact]
@@ -119,7 +125,7 @@ public sealed class BudgetSkillTests
         await skill.TransferBudgetAsync("Groceries", "Dining", 300m, "2026-08-01");
 
         var status = await skill.CheckBudgetStatusAsync("2026-08-01");
-        Assert.Contains($"Dining: {0m:C} / {500m:C}", status);
+        Assert.Contains($"Dining: {CurrencyFormatter.Format(0m, "USD")} / {CurrencyFormatter.Format(500m, "USD")}", status);
     }
 
     [Fact]
@@ -134,12 +140,12 @@ public sealed class BudgetSkillTests
         var result = await skill.TransferBudgetAsync("Groceries", "Dining", 1500m, "2026-08-01");
 
         Assert.Contains("Cannot transfer", result);
-        Assert.Contains($"{500m:C}", result);
+        Assert.Contains(CurrencyFormatter.Format(500m, "USD"), result);
 
         // Neither budget row changed — the important negative case.
         var status = await skill.CheckBudgetStatusAsync("2026-08-01");
-        Assert.Contains($"Groceries: {0m:C} / {500m:C}", status);
-        Assert.Contains($"Dining: {0m:C} / {200m:C}", status);
+        Assert.Contains($"Groceries: {CurrencyFormatter.Format(0m, "USD")} / {CurrencyFormatter.Format(500m, "USD")}", status);
+        Assert.Contains($"Dining: {CurrencyFormatter.Format(0m, "USD")} / {CurrencyFormatter.Format(200m, "USD")}", status);
     }
 
     [Fact]
@@ -155,8 +161,8 @@ public sealed class BudgetSkillTests
 
         var result = await skill.TransferBudgetAsync("Groceries", "Dining", 600m, "2026-08-01");
 
-        Assert.Contains($"Entertainment ({800m:C})", result);
-        Assert.Contains($"Transport ({650m:C})", result);
+        Assert.Contains($"Entertainment ({CurrencyFormatter.Format(800m, "USD")})", result);
+        Assert.Contains($"Transport ({CurrencyFormatter.Format(650m, "USD")})", result);
         Assert.DoesNotContain("Utilities", result);
     }
 

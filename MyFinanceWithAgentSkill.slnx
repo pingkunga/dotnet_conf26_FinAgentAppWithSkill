@@ -10,5 +10,6 @@
     <Project Path="tests/FinanceApp.AI.Tests/FinanceApp.AI.Tests.csproj" />
     <Project Path="tests/FinanceApp.McpServer.Tests/FinanceApp.McpServer.Tests.csproj" />
     <Project Path="tests/FinanceApp.Skills.Tests/FinanceApp.Skills.Tests.csproj" />
+    <Project Path="tests/FinanceApp.Web.Tests/FinanceApp.Web.Tests.csproj" />
   </Folder>
 </Solution>

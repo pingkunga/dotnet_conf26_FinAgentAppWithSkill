@@ -60,6 +60,86 @@ public sealed class ReceiptOcrSkillFactoryTests
     }
 
     [Fact]
+    public async Task Extract_WithADetectedCurrencyDifferentFromPreferred_RecordsItRawWithoutConverting()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        // No ApplicationUser row is seeded, so GetPreferredCurrencyAsync falls back to "USD" — this receipt
+        // is in THB, a different currency, so it should be recorded as-is (350 THB), not converted.
+        var chatClient = new FakeChatClient("""{"vendor":"Bangkok Cafe","amount":350,"date":"2026-08-01","category":"Dining","currency":"THB"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        var result = await RunExtractScriptAsync(skill);
+
+        Assert.Contains("recorded in THB", result);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var savedReceipt = await db.Receipts.FirstAsync(r => r.Id == receipt.Id);
+        Assert.Equal("THB", savedReceipt.ExtractedCurrency);
+
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal("THB", transaction.Currency);
+        Assert.Equal(350m, transaction.Amount);
+    }
+
+    [Fact]
+    public async Task Extract_WithNoCurrencyField_FallsBackToThePreferredCurrencyWithoutANote()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Starbucks","amount":4.5,"date":"2026-08-01","category":"Dining"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        var result = await RunExtractScriptAsync(skill);
+
+        Assert.DoesNotContain("recorded in", result);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal("USD", transaction.Currency);
+        var savedReceipt = await db.Receipts.FirstAsync(r => r.Id == receipt.Id);
+        Assert.Equal("USD", savedReceipt.ExtractedCurrency);
+    }
+
+    [Fact]
+    public async Task Extract_WithAnUnrecognizedCurrencyCode_FallsBackToThePreferredCurrencyRatherThanStoringGarbage()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Somewhere","amount":10,"date":"2026-08-01","category":"Dining","currency":"XYZ"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        await RunExtractScriptAsync(skill);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal("USD", transaction.Currency);
+    }
+
+    [Fact]
+    public async Task Extract_WithALowercaseCurrencyCode_NormalizesItToUppercase()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var userId = Guid.NewGuid();
+        var receipt = await SeedPendingReceiptAsync(dbName, userId);
+
+        var chatClient = new FakeChatClient("""{"vendor":"Bangkok Cafe","amount":350,"date":"2026-08-01","category":"Dining","currency":"thb"}""");
+        var skill = ReceiptOcrSkillFactory.Create(chatClient, BuildScopeFactory(dbName), userId, receipt.Id, supportsVision: true);
+
+        await RunExtractScriptAsync(skill);
+
+        await using var db = await OpenDbAsync(dbName, userId);
+        var transaction = await db.Transactions.FirstAsync(t => t.ReceiptId == receipt.Id);
+        Assert.Equal("THB", transaction.Currency);
+    }
+
+    [Fact]
     public async Task Extract_WithAnUnrecognizedCategoryName_FallsBackToOther()
     {
         var dbName = Guid.NewGuid().ToString();
