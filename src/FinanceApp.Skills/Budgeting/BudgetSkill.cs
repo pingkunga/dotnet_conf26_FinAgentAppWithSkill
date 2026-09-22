@@ -2,6 +2,7 @@ using System.Globalization;
 using FinanceApp.Core;
 using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
+using FinanceApp.Core.Formatting;
 using FinanceApp.Core.Repositories;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
@@ -80,6 +81,12 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         return new FinanceDbContext(options, new FixedCurrentUserAccessor(userId));
     }
 
+    private async Task<string> GetPreferredCurrencyAsync(FinanceDbContext db)
+    {
+        var user = await db.Users.FindAsync(userId);
+        return user?.PreferredCurrency ?? "USD";
+    }
+
     [AgentSkillScript("add_transaction")]
     public async Task<string> AddTransactionAsync(decimal amount, string categoryName, string? description, string? occurredOn)
     {
@@ -93,6 +100,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         }
 
         var date = ParseDateOrToday(occurredOn);
+        var currency = await GetPreferredCurrencyAsync(db);
 
         var transaction = new Transaction
         {
@@ -100,6 +108,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
             UserId = userId,
             CategoryId = category.Id,
             Amount = amount,
+            Currency = currency,
             OccurredOn = date,
             Description = description,
             Source = TransactionSource.Agent,
@@ -109,7 +118,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         db.Transactions.Add(transaction);
         await db.SaveChangesAsync();
 
-        return $"Added {amount:C} to {category.Name} on {date:yyyy-MM-dd}.";
+        return $"Added {CurrencyFormatter.Format(amount, currency)} to {category.Name} on {date:yyyy-MM-dd}.";
     }
 
     /// <summary>
@@ -136,6 +145,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         }
 
         var date = ParseDateOrToday(occurredOn);
+        var currency = await GetPreferredCurrencyAsync(db);
 
         db.Transactions.Add(new Transaction
         {
@@ -143,6 +153,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
             UserId = userId,
             CategoryId = incomeCategory.Id,
             Amount = amount,
+            Currency = currency,
             OccurredOn = date,
             Description = description,
             Source = TransactionSource.Agent,
@@ -150,7 +161,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         });
         await db.SaveChangesAsync();
 
-        return $"Topped up {amount:C} on {date:yyyy-MM-dd}.";
+        return $"Topped up {CurrencyFormatter.Format(amount, currency)} on {date:yyyy-MM-dd}.";
     }
 
     [AgentSkillScript("list_transactions")]
@@ -184,7 +195,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         }
 
         var lines = transactions.Select(t =>
-            $"{t.OccurredOn:yyyy-MM-dd} | {t.Category?.Name ?? "(uncategorized)"} | {t.Amount:C}{(t.Description is null ? "" : $" | {t.Description}")}");
+            $"{t.OccurredOn:yyyy-MM-dd} | {t.Category?.Name ?? "(uncategorized)"} | {CurrencyFormatter.Format(t.Amount, t.Currency)}{(t.Description is null ? "" : $" | {t.Description}")}");
 
         return string.Join('\n', lines);
     }
@@ -225,15 +236,18 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
         await db.SaveChangesAsync();
 
+        var currency = await GetPreferredCurrencyAsync(db);
+        var exchangeRateService = scope.ServiceProvider.GetRequiredService<IExchangeRateService>();
+
         // Informational only — SetBudgetAsync still writes even when this pushes the month's total
         // allocation over income (see BudgetRepository.GetAllocationSummaryAsync's own doc comment for why
         // this is deliberately never a blocking check).
-        var allocation = await BudgetRepository.GetAllocationSummaryAsync(db, userId, period);
+        var allocation = await BudgetRepository.GetAllocationSummaryAsync(db, userId, period, currency, exchangeRateService);
         var overNote = allocation.IsOverAllocated
-            ? $" Note: total allocated for {period:yyyy-MM} now exceeds income by {-allocation.AvailableToAllocate:C}."
+            ? $" Note: total allocated for {period:yyyy-MM} now exceeds income by {CurrencyFormatter.Format(-allocation.AvailableToAllocate, currency)}."
             : "";
 
-        return $"Set {category.Name} budget for {period:yyyy-MM} to {limitAmount:C}.{overNote}";
+        return $"Set {category.Name} budget for {period:yyyy-MM} to {CurrencyFormatter.Format(limitAmount, currency)}.{overNote}";
     }
 
     /// <summary>
@@ -264,6 +278,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         }
 
         var period = NormalizeToMonthStart(ParseDateOrToday(periodMonth));
+        var currency = await GetPreferredCurrencyAsync(db);
 
         var fromBudget = await db.Budgets.FirstOrDefaultAsync(b =>
             b.UserId == userId && b.CategoryId == fromCategory.Id && b.PeriodMonth == period);
@@ -282,11 +297,11 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
             var suggestion = alternatives.Count > 0
                 ? " Categories with enough headroom instead: " +
-                  string.Join(", ", alternatives.Select(b => $"{b.Category.Name} ({b.LimitAmount:C})")) + "."
+                  string.Join(", ", alternatives.Select(b => $"{b.Category.Name} ({CurrencyFormatter.Format(b.LimitAmount, currency)})")) + "."
                 : "";
 
-            return $"Cannot transfer {amount:C} from {fromCategory.Name} for {period:yyyy-MM} — only " +
-                   $"{available:C} available.{suggestion} Ask the user how they'd like to proceed.";
+            return $"Cannot transfer {CurrencyFormatter.Format(amount, currency)} from {fromCategory.Name} for {period:yyyy-MM} — only " +
+                   $"{CurrencyFormatter.Format(available, currency)} available.{suggestion} Ask the user how they'd like to proceed.";
         }
 
         var toBudget = await db.Budgets.FirstOrDefaultAsync(b =>
@@ -312,8 +327,8 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
         await db.SaveChangesAsync();
 
-        return $"Transferred {amount:C} from {fromCategory.Name} to {toCategory.Name} for {period:yyyy-MM}. " +
-               $"{fromCategory.Name} is now {fromBudget.LimitAmount:C}, {toCategory.Name} is now {toBudget.LimitAmount:C}.";
+        return $"Transferred {CurrencyFormatter.Format(amount, currency)} from {fromCategory.Name} to {toCategory.Name} for {period:yyyy-MM}. " +
+               $"{fromCategory.Name} is now {CurrencyFormatter.Format(fromBudget.LimitAmount, currency)}, {toCategory.Name} is now {CurrencyFormatter.Format(toBudget.LimitAmount, currency)}.";
     }
 
     [AgentSkillScript("check_budget_status")]
@@ -330,10 +345,11 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
             return $"No budgets set for {period:yyyy-MM}.";
         }
 
+        var currency = await GetPreferredCurrencyAsync(db);
         var lines = statuses.Select(s =>
         {
             var flag = s.IsOver ? " [OVER]" : s.IsNear ? " [NEAR]" : "";
-            return $"{s.CategoryName}: {s.SpentAmount:C} / {s.LimitAmount:C} ({s.PercentUsed:F0}%){flag}";
+            return $"{s.CategoryName}: {CurrencyFormatter.Format(s.SpentAmount, currency)} / {CurrencyFormatter.Format(s.LimitAmount, currency)} ({s.PercentUsed:F0}%){flag}";
         });
 
         return string.Join('\n', lines);
@@ -366,6 +382,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
         }
 
         var date = ParseDateOrToday(occurredOn);
+        var currency = await GetPreferredCurrencyAsync(db);
 
         db.Transactions.Add(new Transaction
         {
@@ -373,6 +390,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
             UserId = userId,
             CategoryId = SeedData.SavingsCategoryId,
             Amount = amount,
+            Currency = currency,
             OccurredOn = date,
             Description = $"Contribution to \"{goal.Name}\"",
             Source = TransactionSource.Agent,
@@ -382,7 +400,7 @@ public sealed class BudgetSkill(IServiceScopeFactory scopeFactory, Guid userId)
 
         await db.SaveChangesAsync();
 
-        return $"Added {amount:C} to \"{goal.Name}\" on {date:yyyy-MM-dd}. New total: {goal.CurrentAmount:C} / {goal.TargetAmount:C}.";
+        return $"Added {CurrencyFormatter.Format(amount, currency)} to \"{goal.Name}\" on {date:yyyy-MM-dd}. New total: {CurrencyFormatter.Format(goal.CurrentAmount, currency)} / {CurrencyFormatter.Format(goal.TargetAmount, currency)}.";
     }
 
     private async Task<Category?> FindCategoryAsync(FinanceDbContext db, string categoryName) =>

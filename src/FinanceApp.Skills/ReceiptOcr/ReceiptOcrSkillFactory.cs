@@ -3,6 +3,7 @@ using System.Text.Json;
 using FinanceApp.Core;
 using FinanceApp.Core.Abstractions;
 using FinanceApp.Core.Entities;
+using FinanceApp.Core.Formatting;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
@@ -76,9 +77,12 @@ public static class ReceiptOcrSkillFactory
             return $"Status: Failed. Raw AI response: {receipt.OcrRawResponse ?? "(none)"}.";
         }
 
-        // Succeeded or Manual — both have real extracted fields worth reporting.
+        // Succeeded or Manual — both have real extracted fields worth reporting. Prefer the receipt's own
+        // detected/resolved currency (set by ExtractAsync below) — only falls back to PreferredCurrency for
+        // receipts predating the ExtractedCurrency column.
+        var currency = receipt.ExtractedCurrency ?? await GetPreferredCurrencyAsync(db, userId);
         var fields = $"vendor={receipt.ExtractedVendor ?? "(unknown)"}, " +
-                     $"amount={(receipt.ExtractedAmount is { } a ? a.ToString("C") : "(unknown)")}, " +
+                     $"amount={(receipt.ExtractedAmount is { } a ? CurrencyFormatter.Format(a, currency) : "(unknown)")}, " +
                      $"date={(receipt.ExtractedDate is { } d ? d.ToString("d") : "(unknown)")}, " +
                      $"category={receipt.ExtractedCategory?.Name ?? "(unknown)"}";
 
@@ -151,8 +155,8 @@ public static class ReceiptOcrSkillFactory
         var category = await FindCategoryAsync(db, extracted.Category)
             ?? await db.Categories.FirstAsync(c => c.Id == SeedData.OtherCategoryId);
 
-        
-        // grounding the AI's guess in the user's own history is a deliberate design choice 
+
+        // grounding the AI's guess in the user's own history is a deliberate design choice
         string? historyNote = null;
         if (extracted.Vendor is { Length: > 0 } vendor)
         {
@@ -166,13 +170,24 @@ public static class ReceiptOcrSkillFactory
 
         receipt.ExtractedCategoryId = category.Id;
 
+        // OCR detects the receipt's own currency where it can (never guessed at 1:1/converted — same
+        // graceful-degradation principle as BudgetAllocationSummary.ConversionIncomplete: an unrecognized
+        // or hallucinated code falls back to the user's PreferredCurrency rather than being trusted as-is).
+        var preferredCurrency = await GetPreferredCurrencyAsync(db, userId);
+        var normalizedDetected = extracted.Currency?.Trim().ToUpperInvariant();
+        var currency = normalizedDetected is not null && CurrencyFormatter.SupportedCurrencies.Contains(normalizedDetected)
+            ? normalizedDetected
+            : preferredCurrency;
+
+        receipt.ExtractedCurrency = currency;
+
         var transaction = new Transaction
         {
             Id = Guid.NewGuid(),
             UserId = userId,
             CategoryId = category.Id,
             Amount = amount,
-
+            Currency = currency,
             OccurredOn = extracted.Date ?? DateOnly.FromDateTime(DateTime.Now),
             Description = extracted.Vendor,
             Source = TransactionSource.ReceiptOcr,
@@ -186,8 +201,12 @@ public static class ReceiptOcrSkillFactory
 
         await db.SaveChangesAsync();
 
-        return $"Extracted vendor={extracted.Vendor ?? "(unknown)"}, amount={amount:C}, " +
-               $"date={transaction.OccurredOn:d}, category={category.Name}{historyNote}. Recorded as a transaction.";
+        var currencyNote = currency != preferredCurrency
+            ? $" (recorded in {currency} — converts automatically on Budgets/Home since your preferred currency is {preferredCurrency})"
+            : "";
+
+        return $"Extracted vendor={extracted.Vendor ?? "(unknown)"}, amount={CurrencyFormatter.Format(amount, currency)}, " +
+               $"date={transaction.OccurredOn:d}, category={category.Name}{historyNote}.{currencyNote} Recorded as a transaction.";
     }
 
     /// <summary>
@@ -221,9 +240,11 @@ public static class ReceiptOcrSkillFactory
     private const string ExtractionPrompt = """
         Look at this receipt image and extract these fields as a single JSON object and nothing else — no
         markdown, no explanation:
-        {"vendor": string or null, "amount": number or null, "date": "YYYY-MM-DD" or null, "category": string or null}
+        {"vendor": string or null, "amount": number or null, "date": "YYYY-MM-DD" or null, "category": string or null, "currency": string or null}
         "category" should be your best guess at a short category label (e.g. "Groceries", "Dining",
-        "Transport"). If a field isn't clearly readable, use null for it rather than guessing.
+        "Transport"). "currency" should be the ISO 4217 3-letter code (e.g. "USD", "THB", "EUR") guessed
+        from any currency symbol or code printed on the receipt — use null if you can't tell. If a field
+        isn't clearly readable, use null for it rather than guessing.
         """;
 
     /// <summary>
@@ -237,6 +258,12 @@ public static class ReceiptOcrSkillFactory
     {
         var options = scopedProvider.GetRequiredService<DbContextOptions<FinanceDbContext>>();
         return new FinanceDbContext(options, new FixedCurrentUserAccessor(userId));
+    }
+
+    private static async Task<string> GetPreferredCurrencyAsync(FinanceDbContext db, Guid userId)
+    {
+        var user = await db.Users.FindAsync(userId);
+        return user?.PreferredCurrency ?? "USD";
     }
 
     private static async Task<Category?> FindCategoryAsync(FinanceDbContext db, string? categoryName) =>
@@ -282,7 +309,11 @@ public static class ReceiptOcrSkillFactory
                 ? c.GetString()
                 : null;
 
-            return new ExtractedFields(vendor, amount, date, category);
+            string? currency = root.TryGetProperty("currency", out var cur) && cur.ValueKind == JsonValueKind.String
+                ? cur.GetString()
+                : null;
+
+            return new ExtractedFields(vendor, amount, date, category, currency);
         }
         catch (JsonException)
         {
@@ -290,5 +321,5 @@ public static class ReceiptOcrSkillFactory
         }
     }
 
-    private sealed record ExtractedFields(string? Vendor, decimal? Amount, DateOnly? Date, string? Category);
+    private sealed record ExtractedFields(string? Vendor, decimal? Amount, DateOnly? Date, string? Category, string? Currency);
 }
