@@ -4,12 +4,15 @@
 @implements IAsyncDisposable
 @using FinanceApp.AI
 @using FinanceApp.Core
+@using FinanceApp.Core.Abstractions
+@using FinanceApp.Core.Formatting
 @using FinanceApp.Web.Services
 @using Markdig
 @using Microsoft.Agents.AI
 @using Microsoft.Extensions.AI
 @inject ChatSessionService ChatSession
 @inject FinanceDbContext Db
+@inject ICurrentUserAccessor CurrentUser
 @inject ILogger<Chat> Logger
 
 <PageTitle>Chat</PageTitle>
@@ -116,12 +119,17 @@
             var goal = await Db.SavingsGoals.FindAsync(goalId);
             if (goal is not null)
             {
+                // SavingsGoal has no Currency column — assumed to be in the user's PreferredCurrency
+                // (docs/spec.md's known limitations).
+                var user = await Db.Users.FindAsync(CurrentUser.UserId);
+                var currency = user?.PreferredCurrency ?? "USD";
+
                 // Not this user's goal (query-filtered out) or it doesn't exist — say nothing rather than
                 // reveal which case it was.
-                input = $"I have a savings goal called \"{goal.Name}\": current amount {goal.CurrentAmount:C}, " +
-                        $"target amount {goal.TargetAmount:C}" +
+                input = $"I have a savings goal called \"{goal.Name}\": current amount {CurrencyFormatter.Format(goal.CurrentAmount, currency)}, " +
+                        $"target amount {CurrencyFormatter.Format(goal.TargetAmount, currency)}" +
                         (goal.TargetDate is { } targetDate ? $", target date {targetDate:d}" : "") +
-                        (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {contribution:C}" : "") +
+                        (goal.MonthlyContribution is { } contribution ? $", planned monthly contribution {CurrencyFormatter.Format(contribution, currency)}" : "") +
                         ". Give me guidance on this goal, and an exact projection if you can.";
             }
         }

@@ -4,6 +4,7 @@
 @using FinanceApp.Core
 @using FinanceApp.Core.Abstractions
 @using FinanceApp.Core.Entities
+@using FinanceApp.Core.Formatting
 @using Microsoft.EntityFrameworkCore
 @inject FinanceDbContext Db
 @inject ICurrentUserAccessor CurrentUser
@@ -77,10 +78,10 @@
                 var percent = context.TargetAmount == 0m ? 0m : Math.Min(context.CurrentAmount / context.TargetAmount * 100m, 100m);
             }
             <MudProgressLinear Value="@((double)percent)" Color="Color.Primary" Class="my-1" />
-            @context.CurrentAmount.ToString("C") / @context.TargetAmount.ToString("C")
+            @CurrencyFormatter.Format(context.CurrentAmount, preferredCurrency) / @CurrencyFormatter.Format(context.TargetAmount, preferredCurrency)
         </MudTd>
         <MudTd DataLabel="Target date">@(context.TargetDate?.ToString("d") ?? "—")</MudTd>
-        <MudTd DataLabel="Monthly contribution">@(context.MonthlyContribution?.ToString("C") ?? "—")</MudTd>
+        <MudTd DataLabel="Monthly contribution">@(context.MonthlyContribution is { } mc ? CurrencyFormatter.Format(mc, preferredCurrency) : "—")</MudTd>
         <MudTd DataLabel="Actions">
             <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary" Class="mr-2"
                        OnClick="@(() => Nav.NavigateTo($"/Chat?goalId={context.Id}"))">
@@ -111,8 +112,13 @@
     private decimal contributeAmount;
     private DateTime? contributeDate = DateTime.Today;
 
+    private string preferredCurrency = "USD";
+
     protected override async Task OnInitializedAsync()
     {
+        var user = await Db.Users.FindAsync(CurrentUser.UserId);
+        preferredCurrency = user?.PreferredCurrency ?? "USD";
+
         await LoadAsync();
     }
 
@@ -233,6 +239,7 @@
             UserId = CurrentUser.UserId!.Value,
             CategoryId = SeedData.SavingsCategoryId,
             Amount = contributeAmount,
+            Currency = preferredCurrency,
             OccurredOn = occurredOnDate,
             Description = $"Contribution to \"{goal.Name}\"",
             Source = TransactionSource.Manual,

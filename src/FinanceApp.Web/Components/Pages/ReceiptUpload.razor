@@ -6,6 +6,7 @@
 @using FinanceApp.Core
 @using FinanceApp.Core.Abstractions
 @using FinanceApp.Core.Entities
+@using FinanceApp.Core.Formatting
 @using FinanceApp.Web.Services
 @using Microsoft.Agents.AI
 @using Microsoft.EntityFrameworkCore
@@ -98,6 +99,14 @@
                         <MudItem xs="12" sm="2">
                             <MudNumericField T="decimal" @bind-Value="manualAmount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
                         </MudItem>
+                        <MudItem xs="12" sm="2">
+                            <MudSelect T="string" @bind-Value="manualCurrency" Label="Currency" Required="true">
+                                @foreach (var c in CurrencyFormatter.SupportedCurrencies)
+                                {
+                                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
                         <MudItem xs="12" sm="3">
                             <MudSelect T="Guid?" @bind-Value="manualCategoryId" Label="Category" Required="true">
                                 @foreach (var c in categories)
@@ -141,7 +150,7 @@
             <MudChip T="string" Size="Size.Small" Color="@StatusColor(context.OcrStatus)">@context.OcrStatus</MudChip>
         </MudTd>
         <MudTd DataLabel="Vendor">@(context.ExtractedVendor ?? "—")</MudTd>
-        <MudTd DataLabel="Amount">@(context.ExtractedAmount?.ToString("C") ?? "—")</MudTd>
+        <MudTd DataLabel="Amount">@(context.ExtractedAmount is { } ea ? CurrencyFormatter.Format(ea, context.ExtractedCurrency ?? preferredCurrency) : "—")</MudTd>
         <MudTd DataLabel="Category">@(context.ExtractedCategory?.Name ?? "—")</MudTd>
         <MudTd DataLabel="Actions">
             <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="@(() => StartEdit(context))">Edit</MudButton>
@@ -168,8 +177,11 @@
 
     private string manualVendor = "";
     private decimal manualAmount;
+    private string manualCurrency = "USD";
     private Guid? manualCategoryId;
     private DateTime? manualDate;
+
+    private string preferredCurrency = "USD";
 
     // Inline AI-extraction state — ChatSession.SendAsync/ResumeWithApprovalAsync drives the same
     // AIAgent/AgentSession Chat.razor uses (ChatSessionService is scoped per Blazor circuit), just drained
@@ -185,6 +197,10 @@
     protected override async Task OnInitializedAsync()
     {
         categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+
+        var user = await Db.Users.FindAsync(CurrentUser.UserId);
+        preferredCurrency = user?.PreferredCurrency ?? "USD";
+
         await LoadReceiptsAsync();
     }
 
@@ -369,6 +385,7 @@
             currentReceipt = refreshed;
             manualVendor = refreshed.ExtractedVendor ?? "";
             manualAmount = refreshed.ExtractedAmount ?? 0;
+            manualCurrency = refreshed.ExtractedCurrency ?? preferredCurrency;
             manualCategoryId = refreshed.ExtractedCategoryId;
             manualDate = refreshed.ExtractedDate?.ToDateTime(TimeOnly.MinValue);
         }
@@ -384,6 +401,7 @@
         previewDataUrl = $"data:{receipt.ContentType};base64,{Convert.ToBase64String(receipt.ImageBytes)}";
         manualVendor = receipt.ExtractedVendor ?? "";
         manualAmount = receipt.ExtractedAmount ?? 0;
+        manualCurrency = receipt.ExtractedCurrency ?? preferredCurrency;
         manualCategoryId = receipt.ExtractedCategoryId;
         manualDate = receipt.ExtractedDate?.ToDateTime(TimeOnly.MinValue);
         extracting = false;
@@ -398,6 +416,7 @@
         previewDataUrl = null;
         manualVendor = "";
         manualAmount = 0;
+        manualCurrency = preferredCurrency;
         manualCategoryId = null;
         manualDate = null;
         extracting = false;
@@ -432,6 +451,7 @@
         {
             var transaction = await Db.Transactions.FirstAsync(t => t.Id == transactionId);
             transaction.Amount = manualAmount;
+            transaction.Currency = manualCurrency;
             transaction.CategoryId = manualCategoryId;
             transaction.Description = vendor;
             transaction.OccurredOn = occurredOn;
@@ -444,6 +464,7 @@
                 UserId = CurrentUser.UserId!.Value,
                 CategoryId = manualCategoryId.Value,
                 Amount = manualAmount,
+                Currency = manualCurrency,
                 OccurredOn = occurredOn,
                 Description = vendor,
                 Source = TransactionSource.Manual,
@@ -457,6 +478,7 @@
 
         receipt.ExtractedVendor = vendor;
         receipt.ExtractedAmount = manualAmount;
+        receipt.ExtractedCurrency = manualCurrency;
         receipt.ExtractedCategoryId = manualCategoryId;
         receipt.ExtractedDate = occurredOn;
 

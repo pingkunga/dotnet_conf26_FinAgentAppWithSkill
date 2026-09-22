@@ -4,6 +4,7 @@
 @using FinanceApp.Core
 @using FinanceApp.Core.Abstractions
 @using FinanceApp.Core.Entities
+@using FinanceApp.Core.Formatting
 @using Microsoft.EntityFrameworkCore
 @inject FinanceDbContext Db
 @inject ICurrentUserAccessor CurrentUser
@@ -16,7 +17,7 @@
 <MudPaper Class="pa-4 mb-4">
     <EditForm Model="this" OnValidSubmit="SaveTransactionAsync">
         <MudGrid>
-            <MudItem xs="12" sm="3">
+            <MudItem xs="12" sm="2">
                 <MudSelect T="Guid?" @bind-Value="categoryId" Label="Category" Required="true">
                     @foreach (var c in categories)
                     {
@@ -27,10 +28,18 @@
             <MudItem xs="12" sm="2">
                 <MudNumericField T="decimal" @bind-Value="amount" Label="Amount" Min="0.01m" Format="F2" Required="true" />
             </MudItem>
-            <MudItem xs="12" sm="3">
+            <MudItem xs="12" sm="1">
+                <MudSelect T="string" @bind-Value="currency" Label="Currency" Required="true">
+                    @foreach (var c in CurrencyFormatter.SupportedCurrencies)
+                    {
+                        <MudSelectItem Value="@c">@c</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" sm="2">
                 <MudDatePicker @bind-Date="occurredOn" Label="Date" />
             </MudItem>
-            <MudItem xs="12" sm="3">
+            <MudItem xs="12" sm="2">
                 <MudTextField @bind-Value="description" Label="Description" />
             </MudItem>
             <MudItem xs="12" sm="1" Class="d-flex align-center">
@@ -54,7 +63,7 @@
     <RowTemplate>
         <MudTd DataLabel="Date">@context.OccurredOn.ToString("yyyy-MM-dd")</MudTd>
         <MudTd DataLabel="Category">@(context.Category?.Name ?? "(uncategorized)")</MudTd>
-        <MudTd DataLabel="Amount">@context.Amount.ToString("C")</MudTd>
+        <MudTd DataLabel="Amount">@CurrencyFormatter.Format(context.Amount, context.Currency)</MudTd>
         <MudTd DataLabel="Description">@context.Description</MudTd>
         <MudTd DataLabel="Source">@context.Source</MudTd>
         <MudTd DataLabel="Actions">
@@ -75,12 +84,20 @@
     private Guid? editingId;
     private Guid? categoryId;
     private decimal amount;
+    private string currency = "USD";
     private DateTime? occurredOn = DateTime.Today;
     private string? description;
+
+    private string preferredCurrency = "USD";
 
     protected override async Task OnInitializedAsync()
     {
         categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+
+        var user = await Db.Users.FindAsync(CurrentUser.UserId);
+        preferredCurrency = user?.PreferredCurrency ?? "USD";
+        currency = preferredCurrency;
+
         await LoadTransactionsAsync();
     }
 
@@ -114,6 +131,7 @@
                 UserId = CurrentUser.UserId!.Value,
                 CategoryId = categoryId,
                 Amount = amount,
+                Currency = currency,
                 OccurredOn = occurredOnDate,
                 Description = trimmedDescription,
                 Source = TransactionSource.Manual,
@@ -128,6 +146,7 @@
             {
                 existing.CategoryId = categoryId;
                 existing.Amount = amount;
+                existing.Currency = currency;
                 existing.OccurredOn = occurredOnDate;
                 existing.Description = trimmedDescription;
             }
@@ -144,6 +163,7 @@
         editingId = transaction.Id;
         categoryId = transaction.CategoryId;
         amount = transaction.Amount;
+        currency = transaction.Currency;
         occurredOn = transaction.OccurredOn.ToDateTime(TimeOnly.MinValue);
         description = transaction.Description;
     }
@@ -167,6 +187,7 @@
         editingId = null;
         categoryId = null;
         amount = 0;
+        currency = preferredCurrency;
         description = null;
         occurredOn = DateTime.Today;
     }

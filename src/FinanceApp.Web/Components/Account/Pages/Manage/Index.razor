@@ -3,6 +3,7 @@
 @using System.ComponentModel.DataAnnotations
 @using Microsoft.AspNetCore.Identity
 @using FinanceApp.Core.Entities
+@using FinanceApp.Core.Formatting
 
 @inject UserManager<ApplicationUser> UserManager
 @inject SignInManager<ApplicationUser> SignInManager
@@ -18,6 +19,21 @@
     <MudStack Spacing="3" Style="max-width: 480px;">
         <MudTextField Value="@username" Label="Username" Disabled="true" />
         <MudTextField @bind-Value="Input.PhoneNumber" For="() => Input.PhoneNumber" Label="Phone number" name="Input.PhoneNumber" />
+
+        <MudText Typo="Typo.subtitle2" Class="mt-4">Preferred currency</MudText>
+        <MudText Typo="Typo.body2" Color="Color.Secondary">
+            New transactions default to this currency, and it's what budget/income totals are converted
+            into. Changing this relabels existing budgets and goals — it does not convert their amounts.
+        </MudText>
+        @* MudSelect renders no `name` attribute and doesn't bind on a real POST under this page's static
+           SSR (no @rendermode InteractiveServer here) — same reason the two toggles below use the built-in
+           InputCheckbox instead of MudCheckBox. Plain InputSelect works because it's a real <select>. *@
+        <InputSelect @bind-Value="Input.PreferredCurrency" class="mud-input-root" style="max-width: 200px; padding: 8px;">
+            @foreach (var currency in CurrencyFormatter.SupportedCurrencies)
+            {
+                <option value="@currency">@currency</option>
+            }
+        </InputSelect>
 
         <MudText Typo="Typo.subtitle2" Class="mt-4">Chat assistant approvals</MudText>
         <MudText Typo="Typo.body2" Color="Color.Secondary">
@@ -83,6 +99,7 @@
         {
             Input.AutoApproveWrites = user.AutoApproveWrites;
             Input.AutoApproveExecuteScript = user.AutoApproveExecuteScript;
+            Input.PreferredCurrency = user.PreferredCurrency;
         }
     }
 
@@ -113,6 +130,7 @@
 
         user.AutoApproveWrites = Input.AutoApproveWrites;
         user.AutoApproveExecuteScript = Input.AutoApproveExecuteScript;
+        user.PreferredCurrency = Input.PreferredCurrency;
         var updateResult = await UserManager.UpdateAsync(user);
         if (!updateResult.Succeeded)
         {
@@ -135,5 +153,8 @@
 
         [Display(Name = "Auto-approve script execution")]
         public bool AutoApproveExecuteScript { get; set; }
+
+        [Display(Name = "Preferred currency")]
+        public string PreferredCurrency { get; set; } = "USD";
     }
 }

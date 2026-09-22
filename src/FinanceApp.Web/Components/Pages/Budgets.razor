@@ -4,11 +4,13 @@
 @using FinanceApp.Core
 @using FinanceApp.Core.Abstractions
 @using FinanceApp.Core.Entities
+@using FinanceApp.Core.Formatting
 @using FinanceApp.Core.Repositories
 @using Microsoft.EntityFrameworkCore
 @inject FinanceDbContext Db
 @inject ICurrentUserAccessor CurrentUser
 @inject ISnackbar Snackbar
+@inject IExchangeRateService ExchangeRateService
 
 <PageTitle>Budgets</PageTitle>
 
@@ -17,14 +19,20 @@
 @if (allocation is not null)
 {
     <MudAlert Severity="@(allocation.IsOverAllocated ? Severity.Warning : Severity.Info)" Class="mb-4">
-        Income this month: @allocation.IncomeTotal.ToString("C") ·
-        Allocated: @allocation.AllocatedTotal.ToString("C") ·
-        Available: @allocation.AvailableToAllocate.ToString("C")
+        Income this month: @CurrencyFormatter.Format(allocation.IncomeTotal, preferredCurrency) ·
+        Allocated: @CurrencyFormatter.Format(allocation.AllocatedTotal, preferredCurrency) ·
+        Available: @CurrencyFormatter.Format(allocation.AvailableToAllocate, preferredCurrency)
         @if (allocation.IsOverAllocated)
         {
             <text> — total allocated exceeds income.</text>
         }
     </MudAlert>
+    @if (allocation.ConversionIncomplete)
+    {
+        <MudAlert Severity="Severity.Warning" Class="mb-4">
+            Some transactions couldn't be converted to @preferredCurrency — totals may be incomplete.
+        </MudAlert>
+    }
 }
 
 <MudPaper Class="pa-4 mb-4">
@@ -62,8 +70,8 @@
     </HeaderContent>
     <RowTemplate>
         <MudTd DataLabel="Category">@context.CategoryName</MudTd>
-        <MudTd DataLabel="Spent">@context.SpentAmount.ToString("C")</MudTd>
-        <MudTd DataLabel="Limit">@context.LimitAmount.ToString("C")</MudTd>
+        <MudTd DataLabel="Spent">@CurrencyFormatter.Format(context.SpentAmount, preferredCurrency)</MudTd>
+        <MudTd DataLabel="Limit">@CurrencyFormatter.Format(context.LimitAmount, preferredCurrency)</MudTd>
         <MudTd DataLabel="Usage">
             <MudProgressLinear Value="@((double)Math.Min(context.PercentUsed, 100))"
                                 Color="@(context.IsOver ? Color.Error : context.IsNear ? Color.Warning : Color.Success)"
@@ -103,10 +111,15 @@
     private Guid? categoryId;
     private decimal limitAmount;
     private DateTime? periodMonth = DateTime.Today;
+    private string preferredCurrency = "USD";
 
     protected override async Task OnInitializedAsync()
     {
         categories = await Db.Categories.OrderBy(c => c.Name).ToListAsync();
+
+        var user = await Db.Users.FindAsync(CurrentUser.UserId);
+        preferredCurrency = user?.PreferredCurrency ?? "USD";
+
         await LoadStatusAsync();
     }
 
@@ -116,7 +129,8 @@
         var period = DateOnly.FromDateTime(periodMonth ?? DateTime.Today);
         // Shared with BudgetSkill.CheckBudgetStatusAsync (docs/spec.md §7) — same computation, one source of truth.
         statuses = (await BudgetRepository.GetBudgetStatusAsync(Db, CurrentUser.UserId!.Value, period)).ToList();
-        allocation = await BudgetRepository.GetAllocationSummaryAsync(Db, CurrentUser.UserId!.Value, period);
+        allocation = await BudgetRepository.GetAllocationSummaryAsync(
+            Db, CurrentUser.UserId!.Value, period, preferredCurrency, ExchangeRateService);
         loading = false;
     }
 
