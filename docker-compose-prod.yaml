@@ -1,0 +1,73 @@
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-financeapp}
+      POSTGRES_USER: ${POSTGRES_USER:-financeapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.prod}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-financeapp} -d ${POSTGRES_DB:-financeapp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No host port published — only web/mcpserver reach this over the compose network. Uncomment only for
+    # host-side psql access, not recommended on a prod host:
+    # ports:
+    #   - "5432:5432"
+
+  mcpserver:
+    image: ${MCPSERVER_IMAGE:-ghcr.io/pingkunga/financeapp-mcpserver:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.prod}"
+      Mcp__SigningKey: ${MCP_SIGNING_KEY:?MCP_SIGNING_KEY must be set in .env.prod — must match web's value, >=32 bytes}
+    # McpServer's checked-in appsettings.json pins Urls=http://localhost:5299 for local dev; env vars don't
+    # override that binding (ASP.NET Core config precedence), so the container command must win instead —
+    # see docs/spec.md §6.
+    command: ["--urls=http://+:8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No host port published by default — web reaches this over the compose network's internal DNS
+    # (Mcp__BaseUrl below). Uncomment only for manual host-side debugging:
+    # ports:
+    #   - "5299:8080"
+
+  web:
+    image: ${WEB_IMAGE:-ghcr.io/pingkunga/financeapp-web:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      mcpserver: { condition: service_healthy }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Finance: "Host=postgres;Database=${POSTGRES_DB:-financeapp};Username=${POSTGRES_USER:-financeapp};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.prod}"
+      Mcp__BaseUrl: ${MCP_BASE_URL:-http://mcpserver:8080}
+      Mcp__SigningKey: ${MCP_SIGNING_KEY:?MCP_SIGNING_KEY must be set in .env.prod — must match mcpserver's value, >=32 bytes}
+      # External LLM provider only — no local Ollama service in this file. Point these at a real
+      # Azure/OpenAI/Gemini/Anthropic/OpenAI-compatible endpoint; ChatClientFactory reads them identically
+      # regardless of provider (docs/spec.md §3.1).
+      AI__ENGINE_TYPE: ${AI__ENGINE_TYPE:?AI__ENGINE_TYPE must be set (Azure|OpenAI|Gemini|Anthropic)}
+      AI__ENDPOINT: ${AI__ENDPOINT:?AI__ENDPOINT must be set}
+      AI__MODEL_NAME: ${AI__MODEL_NAME:?AI__MODEL_NAME must be set}
+      AI__API_KEY: ${AI__API_KEY:?AI__API_KEY must be set}
+      AI__SUPPORTS_VISION: ${AI__SUPPORTS_VISION:-false}
+      # true on first deploy, to create/apply the schema. Consider flipping to false in .env.prod once the
+      # schema is stable, and running migrations as an explicit one-off step instead — matters more if web
+      # is ever scaled to more than one replica, to avoid concurrent-migration races.
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+    ports:
+      - "8080:8080"
+    # No TLS/reverse proxy bundled here by design — put an external reverse proxy/load balancer (nginx,
+    # Traefik, a cloud LB) in front of this plain-HTTP port.
+
+volumes:
+  pgdata:
