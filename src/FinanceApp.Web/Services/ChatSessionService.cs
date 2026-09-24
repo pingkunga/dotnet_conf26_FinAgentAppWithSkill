@@ -33,7 +33,9 @@ public sealed class ChatSessionService(
     IChatClient chatClient,
     AiOptions aiOptions,
     McpServerLauncher mcpServerLauncher,
-    UserManager<ApplicationUser> userManager) : IAsyncDisposable
+    UserManager<ApplicationUser> userManager,
+    SkillCallLoggingOptions skillCallLoggingOptions,
+    ILoggerFactory loggerFactory) : IAsyncDisposable
 {
     private const string SystemInstructions =
         "You are a helpful personal finance assistant for this app. Use the available skills to look up " +
@@ -182,7 +184,10 @@ public sealed class ChatSessionService(
             ],
         };
 
-        _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions, toolApprovalOptions);
+        // Logs every executed skill call's arguments + result (all 4 skill source types, MCP included) —
+        // wrapped here rather than in AgentFactory because this is where the authenticated userId lives.
+        _agent = agentFactory.CreateAgent(skillsProvider, SystemInstructions, toolApprovalOptions)
+            .WithSkillCallLogging(loggerFactory.CreateLogger(typeof(SkillCallLogging)), userId, skillCallLoggingOptions);
 
         return _agent;
     }

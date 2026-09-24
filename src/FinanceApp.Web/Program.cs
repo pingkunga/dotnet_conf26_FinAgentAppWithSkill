@@ -87,6 +87,10 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<IChatClient>(sp => ChatClientFactory.CreateChatClient(sp.GetRequiredService<AiOptions>()));
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 
+// Skill-call input/result logging options (FinanceApp.AI.SkillCallLogging) — controls whether the arguments and results of skill calls are included in the logs and how long they can be before truncation.
+builder.Services.AddSingleton(builder.Configuration.GetSection(SkillCallLoggingOptions.SectionName).Get<SkillCallLoggingOptions>()
+    ?? new SkillCallLoggingOptions());
+
 // MCP-based skill (docs/spec.md §4.4/§5, Step 1 HTTP-migration) — both singleton: McpServerLauncher holds
 // no session state (a stateless per-call factory method), McpAccessTokenIssuer is stateless config+signing.
 builder.Services.AddSingleton<McpAccessTokenIssuer>();
