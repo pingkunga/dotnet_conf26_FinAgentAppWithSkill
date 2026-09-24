@@ -611,6 +611,7 @@ firm requirement even though it would have looked identical in the activity log.
 (`McpTask` didn't exist in 1.2.0-era `ModelContextProtocol.Core`, which the newer generation's
 `Microsoft.Agents.AI.Mcp` build referenced). This pin now applies specifically to `FinanceApp.Web`'s MCP
 **client** side. `FinanceApp.McpServer` (§5) is pinned differently — see there.
+**Update 2026-09-24:** bumped to `Microsoft.Agents.AI.Mcp` `1.22.0-alpha.260918.1`, whose nuspec now depends on `ModelContextProtocol` **2.2.0** (+ `Microsoft.Agents.AI` 1.22.0 / `Microsoft.Extensions.AI` 10.10.0, bumped together). The client-side 1.2.0 pin described above no longer applies — client and server are on the same MCP generation. Verified by `dotnet build`/`dotnet test` only (no live LLM here).
 
 **User isolation — HTTP-migration Step 1 rewrite (2026-08-14).** The original stdio design (§4.4/§5 as
 implemented 2026-08-13) spawned one `FinanceApp.McpServer` subprocess **per chat session**, with `userId`
@@ -814,7 +815,7 @@ error). Instead `ModelContextProtocol`/`.Core` resolve transitively through `Mod
 AspNetCore` at whatever version *it* needs — confirmed via a spike that a 1.2.0-generation
 `HttpClientTransport` client still talks the wire protocol fine against a server hosted on this newer
 generation; the two sides just can't be mixed **in the same process**, which this project structure avoids
-by construction (client and server are always separate processes now). No dependency on
+by construction (client and server are always separate processes now). *(Superseded 2026-09-24: the central pin is now 2.2.0 on both sides — see §4.4's update note.)* No dependency on
 `Microsoft.Agents.AI.Mcp` — that package is a *client*-side skill-discovery helper (§4.4), the server side
 just implements plain MCP resource handlers by hand (`skill://index.json` is hand-written JSON, not a
 library-generated shape).

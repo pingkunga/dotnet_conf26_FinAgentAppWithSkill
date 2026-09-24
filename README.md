@@ -26,17 +26,17 @@ Each finance feature deliberately uses a *different* Agent Framework skill sourc
   [Markdig](https://github.com/xoofx/markdig) 1.3.2 (`.UseAdvancedExtensions().DisableHtml()`) renders
   assistant messages as sanitized markdown/tables
 - **Data**: PostgreSQL via `Npgsql.EntityFrameworkCore.PostgreSQL` 10.0.3, ASP.NET Core Identity
-  (`Microsoft.AspNetCore.Identity.EntityFrameworkCore` 10.0.10, `IdentityDbContext<ApplicationUser>`)
-- **Agents / skills**: `Microsoft.Agents.AI` + `Microsoft.Agents.AI.Harness` 1.17.0 (`HarnessAgent`,
-  `AgentSkillsProviderBuilder`), `Microsoft.Extensions.AI` 10.8.3 (`IChatClient` abstraction)
+  (`Microsoft.AspNetCore.Identity.EntityFrameworkCore` 10.0.12, `IdentityDbContext<ApplicationUser>`)
+- **Agents / skills**: `Microsoft.Agents.AI` + `Microsoft.Agents.AI.Harness` 1.22.0 (`HarnessAgent`,
+  `AgentSkillsProviderBuilder`), `Microsoft.Extensions.AI` 10.10.0 (`IChatClient` abstraction)
 - **LLM providers** (switched by config, one `IChatClient` construction path for all 5):
-  - Azure OpenAI / OpenAI — `Microsoft.Extensions.AI.OpenAI` + `OpenAI` 2.12.0
+  - Azure OpenAI / OpenAI — `Microsoft.Extensions.AI.OpenAI` + `OpenAI` 2.14.0
   - Ollama — `OllamaSharp` 5.4.30
   - Gemini — `Google_GenerativeAI.Microsoft` 3.6.7
   - Anthropic — `Anthropic.SDK` 5.10.0 (used directly; the Microsoft Agent-level Anthropic package is
     agent-only, not chat-client-level)
 - **MCP**: `ModelContextProtocol` / `ModelContextProtocol.AspNetCore` + `Microsoft.Agents.AI.Mcp`
-  1.17.0-alpha, `System.IdentityModel.Tokens.Jwt` 8.19.2 for bearer tokens
+  1.22.0-alpha, `System.IdentityModel.Tokens.Jwt` 8.23.0 for bearer tokens
 - **Testing**: xUnit, `Microsoft.EntityFrameworkCore.InMemory`, `Microsoft.AspNetCore.Mvc.Testing`
   (`WebApplicationFactory<Program>`) — **no Testcontainers, no Docker/Postgres/LLM required** to run the
   suite (see [Testing](#testing) below)

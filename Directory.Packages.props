@@ -11,64 +11,64 @@
   -->
   <ItemGroup>
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
-    <PackageVersion Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.10" />
-    <PackageVersion Include="MudBlazor" Version="9.8.0" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.12" />
+    <PackageVersion Include="MudBlazor" Version="9.10.0" />
     <!-- Chat.razor markdown rendering (docs/spec.md §7) — github.com/xoofx/markdig -->
-    <PackageVersion Include="Markdig" Version="1.3.2" />
-    <PackageVersion Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <PackageVersion Include="Markdig" Version="1.4.0" />
+    <PackageVersion Include="Microsoft.Agents.AI" Version="1.22.0" />
     <!--
       AgentFactory's construction path (docs/spec.md's approval-toggle plan, superseding the earlier
       AsAIAgent + manual ToolApprovalAgent wrap). Note: HarnessAgentOptions ships marked
       [Experimental("MAAI001")] in this version despite Harness itself being announced GA — AgentFactory.cs
       suppresses that diagnostic narrowly around its construction, not project-wide.
     -->
-    <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
-    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.8.3" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.22.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.10.0" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.12" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
     <!-- ChatClientFactory (docs/spec.md §3.1) — one PackageVersion per provider's IChatClient source -->
-    <PackageVersion Include="OpenAI" Version="2.12.0" />
-    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.3" />
+    <PackageVersion Include="OpenAI" Version="2.14.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.10.0" />
     <PackageVersion Include="OllamaSharp" Version="5.4.30" />
     <PackageVersion Include="Google_GenerativeAI.Microsoft" Version="3.6.7" />
     <PackageVersion Include="Anthropic.SDK" Version="5.10.0" />
     <!-- FinanceApp.AI.Tests — proving/disproving §3.2's env-var-binding claim (see ChatClientFactoryTests) -->
-    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.10" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.12" />
     <!--
       MCP-based skill (docs/spec.md §4.4). Microsoft.Agents.AI.Mcp is alpha-only and its own nuspec pins
-      ModelContextProtocol/ModelContextProtocol.Core to 1.2.0, not the latest 2.1.0 — confirmed via a
-      spike (mixing 2.1.0 in crashes with a TypeLoadException, a type 1.2.0-era code references was
-      removed in 2.x). This pin is now specifically for FinanceApp.Web's MCP *client* side only.
+      ModelContextProtocol to an exact generation. Up to 1.17.0-alpha that was 1.2.0 (mixing 2.x in crashed
+      with a TypeLoadException); as of 1.22.0-alpha.260918.1 (bumped 2026-09-24) its nuspec depends on
+      ModelContextProtocol 2.2.0 + Microsoft.Agents.AI 1.22.0 + Microsoft.Extensions.AI 10.10.0 — so these
+      must be bumped together, and the client side now matches the server's MCP generation.
     -->
-    <PackageVersion Include="Microsoft.Agents.AI.Mcp" Version="1.17.0-alpha.260804.1" />
-    <PackageVersion Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageVersion Include="Microsoft.Agents.AI.Mcp" Version="1.22.0-alpha.260918.1" />
+    <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <!--
-      HTTP MCP transport, Step 1 (docs/spec.md §5). FinanceApp.McpServer hosts over HTTP now, which needs
-      ModelContextProtocol.AspNetCore — a separate package from the base ModelContextProtocol above, not
-      available at 1.2.0. Deliberately pinned newer (latest as of 2026-08-14) than the 1.2.0 client pin —
-      confirmed via a spike that a 1.2.0 HttpClientTransport client talks the wire protocol fine against a
-      server hosted on this newer generation; the two don't need to match.
+      HTTP MCP transport, Step 1 (docs/spec.md §5). FinanceApp.McpServer hosts over HTTP, which needs
+      ModelContextProtocol.AspNetCore — a separate package from the base ModelContextProtocol above. Since
+      2026-09-24 both sides are on the same 2.2.0 generation (previously client 1.2.0 vs server 2.2.0, which
+      a spike confirmed interoperate fine over the wire).
     -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
-    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.12" />
     <!--
       FinanceApp.McpServer.Tests' real concurrent multi-user isolation test (docs/spec.md §5) — an
       in-process WebApplicationFactory<Program> host so an EF Core InMemory database can be shared with the
       test (a real subprocess can't share InMemory data across process boundaries, and no real Postgres is
       available in this environment).
     -->
-    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
     <!--
       FinanceApp.Web mints the per-session bearer token McpServer validates (docs/spec.md §5). Version
       bumped to match what Microsoft.AspNetCore.Authentication.JwtBearer 10.0.10 pulls in transitively
       (Microsoft.IdentityModel.Protocols.OpenIdConnect -> System.IdentityModel.Tokens.Jwt >= 8.19.2) —
       an explicit lower pin here caused an NU1605 package-downgrade error in FinanceApp.McpServer.Tests.
     -->
-    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.19.2" />
+    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.23.0" />
   </ItemGroup>
 
 </Project>
