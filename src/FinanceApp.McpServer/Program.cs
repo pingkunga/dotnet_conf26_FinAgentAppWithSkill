@@ -74,8 +74,15 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
+// Logs every resources/read (uri, JWT-resolved user, duration, result preview) — same SkillCallLogging
+// config section as FinanceApp.Web; IncludePayloads=false keeps users' financial data out of the log.
+var skillCallLogging = builder.Configuration.GetSection("SkillCallLogging");
+var includePayloads = skillCallLogging.GetValue("IncludePayloads", true);
+var maxPayloadChars = skillCallLogging.GetValue("MaxPayloadChars", 2000);
+
 builder.Services.AddMcpServer()
     .WithHttpTransport()
+    .WithRequestFilters(filters => filters.AddReadResourceFilter(McpResourceReadLogging.Create(includePayloads, maxPayloadChars)))
     .WithListResourcesHandler((context, cancellationToken) =>
         context.Services!.GetRequiredService<McpSkillRegistry>()
             .ListResourcesAsync(context, cancellationToken))
