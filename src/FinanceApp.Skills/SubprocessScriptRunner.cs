@@ -4,7 +4,9 @@
 // github.com/pingkunga/gitea-aihook's `feature/add_skill` branch
 // (GiteaAiSummarizerNET/Services/SubprocessScriptRunner.cs) — same porting relationship as
 // FinanceApp.AI/ChatClientFactory.cs. Only the namespace and visibility (internal → public, so
-// FinanceApp.Web can wire it into ChatSessionService) changed; execution logic is unmodified.
+// FinanceApp.Web can wire it into ChatSessionService) changed, plus one deliberate deviation: the Python
+// interpreter is picked by OS (see PythonCommand) instead of a hardcoded "python3" — on Windows "python3"
+// usually resolves to the Microsoft Store App Execution Alias stub (prints "Python was not found", exits 9009) because python.org installers ship no python3.exe.
 //
 // Executes file-based skill scripts as local subprocesses. Demonstration-grade, not hardened: it runs
 // whatever interpreter the script's extension implies, on the same host as the web app, with no sandboxing
@@ -32,6 +34,19 @@ namespace FinanceApp.Skills;
 public static class SubprocessScriptRunner
 {
     /// <summary>
+    /// Windows' exit code for "command not found" — also what the Microsoft Store <c>python3</c> alias stub
+    /// exits with.
+    /// </summary>
+    private const int WindowsCommandNotFoundExitCode = 9009;
+
+    /// <summary>
+    /// <c>py</c> (the Python Launcher, installed into <c>C:\Windows</c> by python.org's installer — never a
+    /// Store alias) on Windows; <c>python3</c> everywhere else, including the Linux Docker image, whose
+    /// Dockerfile installs <c>python3</c> via apt.
+    /// </summary>
+    public static string PythonCommand => OperatingSystem.IsWindows() ? "py" : "python3";
+
+    /// <summary>
     /// Runs a skill script as a local subprocess.
     /// </summary>
     public static async Task<object?> RunAsync(
@@ -49,7 +64,7 @@ public static class SubprocessScriptRunner
         string extension = Path.GetExtension(script.FullPath);
         string? interpreter = extension switch
         {
-            ".py" => "python3",
+            ".py" => PythonCommand,
             ".js" => "node",
             ".sh" => "bash",
             ".ps1" => "pwsh",
@@ -136,6 +151,12 @@ public static class SubprocessScriptRunner
             if (process.ExitCode != 0)
             {
                 output += $"\nScript exited with code {process.ExitCode}";
+
+                if (OperatingSystem.IsWindows() && extension == ".py" && process.ExitCode == WindowsCommandNotFoundExitCode)
+                {
+                    output += $"\nPython interpreter '{interpreter}' was not found - install Python from python.org, " +
+                        "which includes the 'py' launcher this runner uses on Windows.";
+                }
             }
 
             return string.IsNullOrEmpty(output) ? "(no output)" : output.Trim();

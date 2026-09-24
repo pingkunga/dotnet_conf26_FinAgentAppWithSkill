@@ -91,6 +91,42 @@ public sealed class SubprocessScriptRunnerTests
         Assert.Equal("scripts/project-debt-payoff.py", script.Name);
     }
 
+    [Fact]
+    public void PythonCommand_IsPyOnWindows_Python3Elsewhere()
+    {
+        // "python3" on Windows is usually the Microsoft Store App Execution Alias stub (exit 9009) — python.org
+        // installers ship no python3.exe; the Linux Docker image installs python3 via apt.
+        Assert.Equal(OperatingSystem.IsWindows() ? "py" : "python3", SubprocessScriptRunner.PythonCommand);
+    }
+
+    [Fact]
+    public async Task RunAsync_RunsProjectSavingsEndToEnd_WhenInterpreterIsAvailable()
+    {
+        // The one real python invocation in this suite — silently passes where no interpreter exists (the
+        // Docker/python-free testing bar, docs/spec.md §8), but actually runs the script wherever one does.
+        if (!IsOnPath(SubprocessScriptRunner.PythonCommand))
+        {
+            return;
+        }
+
+        var script = await DiscoverProjectSavingsScriptAsync();
+        using var args = JsonDocument.Parse("""["0", "5000", "0", "24"]""");
+
+        var result = Assert.IsType<string>(await SubprocessScriptRunner.RunAsync(
+            script.Skill, script.Script, args.RootElement, null, CancellationToken.None));
+
+        Assert.DoesNotContain("exited with code", result);
+        Assert.Contains("120000", result.Replace(",", ""));
+    }
+
+    private static bool IsOnPath(string command)
+    {
+        var extensions = OperatingSystem.IsWindows() ? new[] { ".exe", ".cmd", ".bat" } : new[] { "" };
+        return (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Any(dir => extensions.Any(ext => File.Exists(Path.Combine(dir, command + ext))));
+    }
+
     private static async Task<(AgentFileSkill Skill, AgentFileSkillScript Script)> DiscoverProjectSavingsScriptAsync()
     {
         var skillsRoot = Path.Combine(AppContext.BaseDirectory, "skills", "savings-calculator");
