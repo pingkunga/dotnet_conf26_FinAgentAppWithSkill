@@ -2,6 +2,10 @@ namespace FinanceApp.Web.Services;
 
 public static class McpSkillsExtractionDirectory
 {
+    //NOTE:
+    // - Windows : C:\Users\<username>\AppData\Local\Temp\financeapp-mcp-skills/<guid>
+    // - Linux   : /tmp/financeapp-mcp-skills/<guid>
+    // - macOS   : /tmp/financeapp-mcp-skills/<guid>
     public static string BaseDirectory { get; } = Path.Combine(Path.GetTempPath(), "financeapp-mcp-skills");
 
     /// <summary>Creates and returns a fresh, uniquely-named directory for one chat session.</summary>
