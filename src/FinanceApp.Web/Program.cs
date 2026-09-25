@@ -113,6 +113,10 @@ builder.Services.AddScoped<ChatSessionService>();
 
 var app = builder.Build();
 
+// Archive-type MCP skills are extracted per chat session under McpSkillsExtractionDirectory.BaseDirectory
+// and deleted when the session ends; this sweeps up whatever a previous run left behind (crash/kill).
+McpSkillsExtractionDirectory.CleanupStale(app.Logger);
+
 // docs/spec.md §6.4 — Web owns all migrations; McpServer is read-only against the same DB.
 // Gated by AUTO_MIGRATE so it can be disabled later without a code change (e.g. multi-instance deploy).
 if (app.Environment.IsDevelopment() || Environment.GetEnvironmentVariable("AUTO_MIGRATE") != "false")

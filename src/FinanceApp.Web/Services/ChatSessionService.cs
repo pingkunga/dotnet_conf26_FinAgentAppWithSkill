@@ -48,6 +48,10 @@ public sealed class ChatSessionService(
     // per session, not from which process this is.
     private McpClient? _mcpClient;
 
+    // This session's own archive-skill extraction directory (McpSkillsExtractionDirectory) — deleted in
+    // DisposeAsync, so extracted MCP archive skills don't pile up as GUID folders in the working directory.
+    private string? _mcpSkillsDirectory;
+
     // Backing list for receipt-OCR inline skills, registered dynamically as the user uploads receipts
     // (docs/spec.md §4.2) — read by DynamicInlineSkillsSource below on every turn (paired with
     // .DisableCaching() on the builder), not snapshotted once at agent-build time. Confirmed via a spike:
@@ -160,7 +164,11 @@ public sealed class ChatSessionService(
         if (_mcpClient is not null)
         {
             // Get Skill from MCP server such as monthly-summary 
-            skillsBuilder = skillsBuilder.UseMcpSkills(_mcpClient, new AgentMcpSkillsSourceOptions());
+            _mcpSkillsDirectory = McpSkillsExtractionDirectory.CreateForSession();
+            skillsBuilder = skillsBuilder.UseMcpSkills(_mcpClient, new AgentMcpSkillsSourceOptions
+            {
+                ArchiveSkillsDirectory = _mcpSkillsDirectory,
+            });
         }
 
         var skillsProvider = skillsBuilder
@@ -197,7 +205,7 @@ public sealed class ChatSessionService(
     /// owning Blazor circuit's DI scope is torn down — <see cref="ChatSessionService"/> is registered
     /// scoped, so the container calls this automatically; no explicit hook-up needed elsewhere. No process
     /// to reap anymore (docs/spec.md §5, Step 1) — the server is a standing service, unaffected by any one
-    /// session ending.
+    /// session ending. Also deletes this session's extracted archive-skill directory.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -205,6 +213,8 @@ public sealed class ChatSessionService(
         {
             await _mcpClient.DisposeAsync();
         }
+
+        McpSkillsExtractionDirectory.TryDelete(_mcpSkillsDirectory, loggerFactory.CreateLogger<ChatSessionService>());
     }
 
     /// <summary>

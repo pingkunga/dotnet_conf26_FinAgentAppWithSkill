@@ -16,6 +16,8 @@
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
     <!-- In-process host for the real concurrent multi-user isolation test -->
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <!-- AgentMcpSkillsSourceTests: the framework's own MCP skill client against this server (archive extraction). -->
+    <PackageReference Include="Microsoft.Agents.AI.Mcp" />
   </ItemGroup>
 
   <ItemGroup>
